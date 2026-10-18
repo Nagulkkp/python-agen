@@ -1,0 +1,38 @@
+# ====================================================================
+# HIMES LARAVEL APPLICATION STRUCTURE & SAFETY RULES
+# ====================================================================
+
+[MODULE 1: Project Overview & Architecture]
+Application Name: HIMES AI Assistant & Healthcare Management System
+Base Directory: /L9/nagul/himes-ai
+Framework: Laravel 12.69 running on PHP 8.2.31
+Database Engine: Microsoft SQL Server (MSSQL) accessed via ODBC Driver 18
+Frontend UI: Blade Templates with Tailwind / CSS3, and Purple Floating Chat Widget (ai_chat_widget.blade.php)
+Integration Endpoint: Route POST /agent/chat handled by AgentChatController@sendMessage
+
+[MODULE 2: Database Safety Guardrails (Strict READ-ONLY)]
+- ONLY `SELECT` and `WITH` (CTE) queries are permitted to run against the database.
+- Strictly FORBIDDEN keywords: `UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `ALTER`, `INSERT`, `CREATE`, `REPLACE`, `MERGE`.
+- Never run multiple statements separated by semicolons (e.g. SELECT 1; DROP TABLE users;).
+- If any database modification or data deletion is needed, the AI agent must refuse execution and request manual human review.
+
+[MODULE 3: Directory & Path Lock Guardrail]
+- The AI Agent is strictly restricted to Nagul's directory: /L9/nagul/ (specifically /L9/nagul/himes-ai).
+- Directory traversal using `cd ..`, `../`, or `..\\` is strictly blocked by security guardrails.
+- Access to root or global system directories such as `/etc`, `/var`, `/home`, `/root`, or other developer directories is forbidden.
+- Destructive commands such as `rm -rf /`, `mkfs`, `dd`, `shutdown`, `reboot` are prohibited.
+
+[MODULE 4: Git Branching & Merging Policy]
+- Never commit or push directly to `main`, `master`, or `development` branches.
+- Always create an isolated sub-branch from the current development branch (e.g., `feature/zoho-task-id` or `fix/issue-description`).
+- Work and make commits strictly inside this sub-branch.
+- Run syntax check (`php -l`) and automated tests (`php artisan test`) before committing.
+- Push the sub-branch to the remote repository and create a Pull Request (PR). Merging must be reviewed by humans.
+
+[MODULE 5: Key Controllers & Route Organization]
+- App\Http\Controllers\AgentChatController: Handles chatbox communication between Laravel and Python FastAPI agent (/agent/chat).
+- App\Http\Controllers\AdminController: Admin login, theme selection, and system administration functions.
+- App\Http\Controllers\ConnectionsController: Database connections manager and query execution trait handler.
+- App\Http\Controllers\AllMasterLogsController: Master audit logs, activity tracking, and system events.
+- App\Http\Controllers\RegistrationAppointmentPostController: Patient appointments and visit creation logic.
+- Storage Logs: Located at storage/logs/laravel.log for inspecting application runtime exceptions.

@@ -1,0 +1,19 @@
+# Web Framework & Server (Receives calls from Laravel)
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+
+# AI & LLM Orchestration
+langchain>=0.2.0
+langchain-google-genai>=2.0.0
+langchain-openai>=0.1.0
+openai>=1.25.0
+
+# Vector Database & Long-term Memory
+chromadb>=0.4.0
+
+# Remote SSH & Automation (for server management / agent actions)
+paramiko>=3.4.0
+
+# Environment Variables & Data Validation
+python-dotenv>=1.0.1
+pydantic>=2.7.0

@@ -1,0 +1,372 @@
+import os
+import sys
+import re
+import uuid
+import datetime
+from typing import Optional, Dict, Any
+from dotenv import load_dotenv
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+import chromadb
+from langchain_openai import OpenAIEmbeddings
+from guardrails import SecurityException, validate_sql_query
+
+# Load environment configuration
+load_dotenv(override=True)
+
+# ----------------------------------------------------------------------
+# 1. LOCAL PERSISTENT CHROMADB STORE IN ./chroma_data
+# ----------------------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CHROMA_DATA_DIR = os.path.join(BASE_DIR, "chroma_data")
+os.makedirs(CHROMA_DATA_DIR, exist_ok=True)
+
+chroma_client = chromadb.PersistentClient(path=CHROMA_DATA_DIR)
+
+# Cosine distance space: identical queries = 0.0, close semantics < 0.25
+CACHE_COLLECTION_NAME = "cache_collection"
+cache_collection = chroma_client.get_or_create_collection(
+    name=CACHE_COLLECTION_NAME,
+    metadata={"hnsw:space": "cosine", "description": "Semantic query-answer cache for AI agent"}
+)
+
+# ----------------------------------------------------------------------
+# 2. EMBEDDINGS MODEL (OpenAI text-embedding-3-small with Local ONNX fallback)
+# ----------------------------------------------------------------------
+class UniversalEmbeddingWrapper:
+    """
+    Supports OpenAI text-embedding-3-small when OPENAI_API_KEY is available in .env,
+    and seamlessly falls back to fast local ONNX embeddings (all-MiniLM-L6-v2) otherwise.
+    """
+    def __init__(self):
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if openai_key and not openai_key.startswith("your_"):
+            try:
+                from langchain_openai import OpenAIEmbeddings
+                self._model = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=openai_key)
+                self.mode = "OpenAI (text-embedding-3-small)"
+                return
+            except Exception:
+                pass
+        
+        # Local ONNX fallback - works 100% offline without API keys
+        from chromadb.utils import embedding_functions
+        self._fn = embedding_functions.DefaultEmbeddingFunction()
+        self.mode = "Local ONNX (all-MiniLM-L6-v2)"
+
+    def embed_query(self, text: str) -> list:
+        if hasattr(self, "_model"):
+            return self._model.embed_query(text)
+        return self._fn([text])[0]
+
+    def embed_documents(self, texts: list) -> list:
+        if hasattr(self, "_model"):
+            return self._model.embed_documents(texts)
+        return self._fn(texts)
+
+_embeddings_instance: Optional[UniversalEmbeddingWrapper] = None
+
+def get_embeddings_model() -> UniversalEmbeddingWrapper:
+    """Lazily initializes and returns the embedding provider."""
+    global _embeddings_instance
+    if _embeddings_instance is None:
+        _embeddings_instance = UniversalEmbeddingWrapper()
+        print(f"[INFO] ChromaDB Embedding Provider active: {_embeddings_instance.mode}")
+    return _embeddings_instance
+
+
+# ----------------------------------------------------------------------
+# 3. SAFETY GUARDRAILS (READ ONLY DB & NAGUL'S DIRECTORY LOCK)
+# ----------------------------------------------------------------------
+SAFETY_SYSTEM_PROMPT = """You are an Autonomous AI Assistant operating strictly within Nagul's environment (/L9/nagul/).
+MANDATORY SAFETY RULES:
+1. DATABASE SAFETY: ONLY SELECT queries are permitted. UPDATE, DELETE, DROP, TRUNCATE, ALTER, INSERT, or any destructive queries are strictly FORBIDDEN.
+2. DIRECTORY RESTRICTION: You are strictly restricted to Nagul's directory (/L9/nagul/). Any access or path modification outside this directory is prohibited.
+Answer factually and concisely based on these guardrails."""
+
+
+def enforce_safety_rules(query: str):
+    """
+    Validates that user queries adhere to:
+    1. Strict READ ONLY DB operations (no UPDATE, DELETE, DROP, INSERT, ALTER).
+    2. Restricted to Nagul's directory (/L9/nagul/).
+    """
+    clean_q = query.strip()
+
+    # Rule 1: Check for dangerous database write/alter keywords
+    dangerous_keywords = ["UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER", "INSERT", "CREATE", "GRANT", "REVOKE"]
+    for kw in dangerous_keywords:
+        if re.search(rf"\b{kw}\b", clean_q, re.IGNORECASE):
+            if re.search(rf"\b(RUN|EXECUTE|SQL|QUERY|TABLE)\b", clean_q, re.IGNORECASE) or any(c in clean_q for c in [";", "--", "/*"]):
+                raise SecurityException(
+                    f"Database Safety Violation: Keyword '{kw}' is forbidden. "
+                    f"Only READ-ONLY (SELECT) database operations are permitted!"
+                )
+
+    # Rule 2: Check for directory escaping or references outside Nagul's directory
+    if re.search(r"\bcd\s+\.\.(?:/|$|\s|;)", clean_q) or "../" in clean_q or "..\\" in clean_q:
+        raise SecurityException("Directory Lock Violation: Directory traversal ('..') outside Nagul's directory is strictly forbidden!")
+
+    # Block unauthorized system root paths
+    for forbidden_path in ["/etc", "/var", "/root", "/home", "C:\\Windows", "C:\\Program Files"]:
+        if forbidden_path.lower() in clean_q.lower():
+            raise SecurityException(f"Directory Lock Violation: Access to '{forbidden_path}' is outside Nagul's authorized directory!")
+
+
+# ----------------------------------------------------------------------
+# 4. LLM CALLER (GPT-4o / Claude with Gemini fallback)
+# ----------------------------------------------------------------------
+def call_llm_api(prompt: str) -> str:
+    """
+    Calls the LLM (GPT-4o or Claude 3.5 Sonnet, with Gemini fallback)
+    enforcing safety guardrails.
+    """
+    openai_key = os.getenv("OPENAI_API_KEY")
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+    # 1. GPT-4o
+    if openai_key and not openai_key.startswith("your_"):
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=openai_key)
+            response = client.chat.completions.create(
+                model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+                messages=[
+                    {"role": "system", "content": SAFETY_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"OpenAI call failed ({e}), checking alternatives...")
+
+    # 2. Claude 3.5 Sonnet
+    if anthropic_key and not anthropic_key.startswith("your_"):
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=anthropic_key)
+            response = client.messages.create(
+                model="claude-3-5-sonnet-20241022",
+                max_tokens=2048,
+                system=SAFETY_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2
+            )
+            return response.content[0].text.strip()
+        except Exception as e:
+            print(f"Claude call failed ({e}), checking alternatives...")
+
+    # 3. Google Gemini (Available in project .env)
+    if gemini_key and not gemini_key.startswith("your_"):
+        try:
+            import google.genai as genai
+            from google.genai import types
+            client = genai.Client(api_key=gemini_key)
+            full_prompt = f"{SAFETY_SYSTEM_PROMPT}\n\nUser Question:\n{prompt}"
+            res = client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=full_prompt,
+                config=types.GenerateContentConfig(temperature=0.2)
+            )
+            return res.text.strip()
+        except Exception as e:
+            print(f"Gemini call failed ({e})...")
+
+    raise ValueError("No active LLM credentials found (OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY).")
+
+
+def extract_intent_aspects(query: str) -> set:
+    q = query.lower()
+    aspects = set()
+    if any(w in q for w in ["deposit", "depoite", "deposite"]):
+        aspects.add("deposit")
+    if any(w in q for w in ["receipt", "recpt"]):
+        aspects.add("receipt")
+    if any(w in q for w in ["bill", "invoice", "billing"]):
+        aspects.add("bill")
+    if any(w in q for w in ["visit", "visits"]):
+        aspects.add("visit")
+    if any(w in q for w in ["mrn", "patient", "name"]):
+        aspects.add("patient")
+    if any(w in q for w in ["service", "services", "cpt"]):
+        aspects.add("service")
+    if any(w in q for w in ["item", "inventory", "drug", "medicine", "pharmacy"]):
+        aspects.add("inventory")
+    if any(w in q for w in ["bed", "room", "ipd"]):
+        aspects.add("bed")
+    if any(w in q for w in ["price", "rate", "tariff", "cost", "selling"]):
+        aspects.add("price")
+    return aspects
+
+
+def extract_entity_numbers(query: str) -> set:
+    return set(re.findall(r'\b\d{4,}\b', query))
+
+
+# ----------------------------------------------------------------------
+# 5. MODULAR SEMANTIC CACHING FUNCTIONS
+# ----------------------------------------------------------------------
+def check_semantic_cache(user_query: str, threshold: float = 0.25) -> Optional[Dict[str, Any]]:
+    """
+    Checks if a semantically similar query exists in ChromaDB cache_collection.
+    Returns matched details dict if distance < threshold and exact entity numbers and intent aspects match.
+    """
+    if not user_query or not user_query.strip():
+        return None
+
+    try:
+        if cache_collection.count() == 0:
+            return None
+
+        embeddings = get_embeddings_model()
+        query_vector = embeddings.embed_query(user_query)
+
+        results = cache_collection.query(
+            query_embeddings=[query_vector],
+            n_results=1,
+            include=["documents", "metadatas", "distances"]
+        )
+
+        if results and results.get("distances") and results["distances"][0]:
+            best_distance = results["distances"][0][0]
+            matched_query = results["documents"][0][0]
+            cached_meta = results["metadatas"][0][0]
+
+            if best_distance < threshold:
+                # 1. Exact Entity Number Guardrail:
+                # Queries with specific IDs (e.g. MRN 3004389 vs 3004383, Visit 16923 vs 16924) MUST have identical entity numbers
+                user_nums = extract_entity_numbers(user_query)
+                matched_nums = extract_entity_numbers(matched_query)
+                if user_nums != matched_nums:
+                    print(f"[CACHE MISS (Entity ID Mismatch)] Query IDs {user_nums} != Cached IDs {matched_nums}")
+                    return None
+
+                # 2. Intent Aspect Guardrail:
+                user_aspects = extract_intent_aspects(user_query)
+                matched_aspects = extract_intent_aspects(matched_query)
+                # If user asks for specific facets like deposit/receipt/service/inventory/bed/price not covered in matched query, reject cache hit
+                missing_aspects = user_aspects - matched_aspects
+                if missing_aspects and ("deposit" in missing_aspects or "receipt" in missing_aspects or "service" in missing_aspects or "inventory" in missing_aspects or "bed" in missing_aspects or "price" in missing_aspects):
+                    print(f"[CACHE MISS (Aspect Mismatch)] User asked for {missing_aspects} not present in cached query '{matched_query}'")
+                    return None
+
+                cached_answer = cached_meta.get("answer", "")
+                print(f"[CACHE HIT] Distance: {best_distance:.4f} (< {threshold}) | Matched: \"{matched_query}\"")
+                return {
+                    "answer": cached_answer,
+                    "distance": best_distance,
+                    "matched_query": matched_query
+                }
+            else:
+                print(f"[CACHE MISS] Nearest distance: {best_distance:.4f} (>= {threshold})")
+    except Exception as e:
+        print(f"[WARNING] Cache check skipped: {e}")
+
+    return None
+
+
+def save_to_semantic_cache(user_query: str, answer: str) -> Optional[str]:
+    """
+    Saves user_query and its answer into ChromaDB cache_collection.
+    Skips caching error responses or prompts asking the user for missing details.
+    """
+    if not user_query or not answer:
+        return None
+
+    lower_ans = answer.lower()
+    for bad in [
+        "please share", "specific mrn", "error processing", "guardrail protection",
+        "unknown column", "no working ai llm", "visit number venum", "mrn venum",
+        "antha visit number", "antha mrn", "please antha", "visit number-a sollunga",
+        "mrn-a sollunga", "sollunga, naan"
+    ]:
+        if bad in lower_ans:
+            print(f"[CACHE SKIP] Answer contains '{bad}', not caching.")
+            return None
+
+    try:
+        embeddings = get_embeddings_model()
+        query_vector = embeddings.embed_query(user_query)
+
+        cache_id = str(uuid.uuid4())
+        cache_collection.add(
+            ids=[cache_id],
+            documents=[user_query],
+            embeddings=[query_vector],
+            metadatas=[{
+                "answer": answer,
+                "cached_at": datetime.datetime.now().isoformat(),
+                "query": user_query
+            }]
+        )
+        print(f"[CACHE STORED] Saved in ChromaDB ID: {cache_id}")
+        return cache_id
+    except Exception as e:
+        print(f"[WARNING] Failed to save response to ChromaDB cache: {e}")
+        return None
+
+
+def get_cached_answer_or_query_llm(user_query: str) -> str:
+    """
+    Searches ChromaDB cache_collection for a query similar to user_query (distance < 0.25).
+    - If a match is found: Returns the cached answer immediately without calling LLM API.
+    - If NO match is found: Calls LLM (GPT-4o/Claude), saves (user_query, llm_answer) to ChromaDB.
+    - Strictly enforces READ-ONLY DB rules and Nagul's directory lock.
+    """
+    if not user_query or not user_query.strip():
+        return "Empty query provided."
+
+    # 1. Enforce strict safety guardrails
+    enforce_safety_rules(user_query)
+
+    # 2. Check cache first
+    cached_result = check_semantic_cache(user_query, threshold=0.25)
+    if cached_result:
+        return cached_result["answer"]
+
+    # 3. Cache MISS -> Call LLM
+    print(f"⚡ Calling LLM for new query: \"{user_query}\"")
+    llm_answer = call_llm_api(user_query)
+
+    # 4. Save into cache
+    save_to_semantic_cache(user_query, llm_answer)
+
+    return llm_answer
+
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("Semantic Caching with ChromaDB & Guardrails")
+    print("=" * 60)
+    print(f"Cache Directory: {CHROMA_DATA_DIR}")
+    print(f"Currently Cached Items: {cache_collection.count()}")
+
+    # Demonstration / Test
+    test_q1 = "Where is the price list management menu located in HIMES?"
+    print(f"\n1. First query (expected cache MISS): \"{test_q1}\"")
+    try:
+        ans1 = get_cached_answer_or_query_llm(test_q1)
+        print(f"Response: {ans1[:120]}...\n")
+
+        # Semantically identical question (different phrasing)
+        test_q2 = "where can I find the price list menu in himes application?"
+        print(f"2. Similar query (expected cache HIT, threshold < 0.25): \"{test_q2}\"")
+        ans2 = get_cached_answer_or_query_llm(test_q2)
+        print(f"Response: {ans2[:120]}...\n")
+
+        # Test Guardrail Safety check
+        print("3. Testing Safety Guardrail (attempting forbidden SQL write):")
+        try:
+            get_cached_answer_or_query_llm("DELETE FROM users WHERE id = 1;")
+        except SecurityException as se:
+            print(f" Guardrail Blocked Successfully: {se}")
+
+    except Exception as e:
+        print(f"Note: {e}")
