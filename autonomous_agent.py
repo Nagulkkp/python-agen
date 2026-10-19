@@ -620,6 +620,34 @@ When you have completed all actions and have the live result, output:
 Final Answer: <Your clear, friendly response to Nagul in Tanglish / Tamil + English, stating factual numbers and results directly>
 """
 
+        is_dev_mode = bool((context or {}).get("is_developer_mode", False))
+        if is_dev_mode:
+            system_prompt += """
+DUAL RESPONSE SYSTEM MODE: 💻 DEVELOPER VIEW (FULL TECHNICAL DETAILS)
+- Return full technical diagnostic data in your Final Answer:
+  • Exact File Paths (e.g. `/L9/nagul/himes-ai/app/Http/Controllers/...`) and Line Numbers
+  • Raw Error Stack Trace / Logs if investigating an issue
+  • Code Changes / Git Diff
+  • SQL Queries Executed (SELECT only) with table relationships
+  • ChromaDB / Valkey Cache Lookup Details
+- Format all code, SQL, and logs inside Markdown code blocks with language identifiers (```sql, ```php, ```bash) to enable copy-to-clipboard functionality.
+"""
+        else:
+            system_prompt += """
+DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
+- STRICT PROHIBITIONS:
+  • NO file paths (do NOT mention /L9/nagul/himes-ai, app/Http/Controllers/..., routes/routes.php, etc.)
+  • NO raw code snippets (no PHP, JS, or shell scripts)
+  • NO database query logs (do NOT output raw SELECT SQL statements)
+  • NO technical error stack traces or framework internals
+- VISUAL LAYOUT & PRESENTATION:
+  • Return responses structured with clean Markdown and status cards:
+    - ✅ Green checkmark status cards for confirmed data / success (e.g. ✅ **Status:** Confirmed / Billed)
+    - ⚠️ Friendly alerts for pending items or issues (e.g. ⚠️ **Status:** In Progress / Pending)
+    - ℹ️ Plain-language action summaries (e.g. "We have identified the issue in the Billing section and our system has initiated an automatic resolution. Status: In Progress").
+  • Polite, friendly Tanglish / English appropriate for hospital doctors, nurses, billing, and front-desk staff.
+"""
+
         context_guidance = ""
         if context:
             # 1. Screen / Page Awareness

@@ -30,10 +30,12 @@ class AgentChatController extends Controller
     {
         // 1. Validate request payload
         $validated = $request->validate([
-            'message'         => 'required|string|max:5000',
-            'session_id'      => 'nullable|string',
-            'preferred_model' => 'nullable|string',
-            'context'         => 'nullable|array',
+            'message'           => 'required|string|max:10000',
+            'session_id'        => 'nullable|string',
+            'preferred_model'   => 'nullable|string',
+            'context'           => 'nullable|array',
+            'is_developer_mode' => 'nullable|boolean',
+            'attachments'       => 'nullable|array',
         ]);
 
         $userMessage = trim($validated['message']);
@@ -55,10 +57,12 @@ class AgentChatController extends Controller
                     'Content-Type' => 'application/json',
                 ])
                 ->post($this->agentUrl, [
-                    'message'         => $userMessage,
-                    'session_id'      => $sessionId,
-                    'preferred_model' => $model,
-                    'context'         => $context,
+                    'message'           => $userMessage,
+                    'session_id'        => $sessionId,
+                    'preferred_model'   => $model,
+                    'context'           => $context,
+                    'is_developer_mode' => $validated['is_developer_mode'] ?? null,
+                    'attachments'       => $validated['attachments'] ?? [],
                 ]);
 
             // 3. Check for successful response
@@ -68,6 +72,7 @@ class AgentChatController extends Controller
                 return response()->json([
                     'status'              => $responseData['status'] ?? 'success',
                     'reply'               => $responseData['reply'] ?? 'No reply generated.',
+                    'mode'                => $responseData['mode'] ?? 'user',
                     'model_used'          => $responseData['model_used'] ?? 'Python Agent',
                     'action_executed'     => $responseData['action_executed'] ?? [],
                     'guardrails_enforced' => $responseData['guardrails_enforced'] ?? [],

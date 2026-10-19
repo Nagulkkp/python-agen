@@ -445,9 +445,28 @@ class ValkeyHimesManager:
         self.save_session_state(session_id, sess)
         return sess
 
+    def set_session_mode(self, session_id: str, mode: str, ttl: int = 86400) -> bool:
+        """
+        Stores current mode ('user' or 'developer') for session under chat_session:{session_id}:mode.
+        """
+        clean_mode = "developer" if str(mode).lower() in ["developer", "dev", "true", "1"] else "user"
+        key = f"chat_session:{session_id}:mode"
+        return self._set(key, clean_mode, ttl=ttl)
+
+    def get_session_mode(self, session_id: str) -> str:
+        """
+        Retrieves current mode for session from chat_session:{session_id}:mode. Default is 'user'.
+        """
+        key = f"chat_session:{session_id}:mode"
+        val = self._get(key)
+        if isinstance(val, str) and val.strip().lower() in ["developer", "dev"]:
+            return "developer"
+        return "user"
+
     def clear_session_state(self, session_id: str) -> bool:
         """Removes session state from Valkey."""
         key = f"himes:session:{session_id}"
+        self._delete(f"chat_session:{session_id}:mode")
         return self._delete(key)
 
     # ----------------------------------------------------------------------
