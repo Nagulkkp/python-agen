@@ -32,6 +32,13 @@ from git_automation import SafeGitWorkflow
 from autonomous_agent import autonomous_agent
 from semantic_cache import check_semantic_cache, save_to_semantic_cache, enforce_safety_rules
 from memory_manager import search_knowledge_base
+from valkey_himes_manager import (
+    valkey_manager,
+    get_himes_context,
+    get_himes_flow,
+    save_session_state,
+    get_session_state
+)
 
 # Load environment variables from .env
 load_dotenv(override=True)
@@ -505,7 +512,47 @@ def chat_with_agent(payload: ChatRequest):
         if m_m:
             sess["active_entities"]["mrn"] = m_m.group(1)
 
-        # 1. Check ChromaDB cache first for instant response (distance <= 0.30)
+        # 1. Valkey Fast-Path: Instant Module Lifecycle & Flow lookup
+        msg_lower = payload.message.lower()
+        is_module_query = any(phrase in msg_lower for phrase in ["flow", "lifecycle", "process", "explain", "tables", "how does", "steps for", "pathina", "workflow", "eclaim", "claim", "pa_"])
+        if is_module_query:
+            module_map = {
+                "prior_visit": ["prior visit", "prior_visit", "pa_patient", "pa_insurance"],
+                "prior_authorization": ["prior authorization", "prior auth", "pa approval", "pre-authorization"],
+                "pharmacy_pa": ["pharmacy pa", "pharmacy", "prescription authorization", "medicine coverage"],
+                "insurance": ["claim", "claims", "eclaim", "remittance", "batch submission"],
+                "billing": ["billing flow", "invoice generation", "co-pay", "credit note", "tariff"],
+                "emr": ["emr", "doctor notes", "vitals", "clinical workflow", "diagnoses"],
+                "registration": ["registration flow", "demographics", "eligibility check"],
+                "masters": ["master configuration", "icd list", "user permissions"]
+            }
+            for mod_k, patterns in module_map.items():
+                if any(p in msg_lower for p in patterns):
+                    mod_data = valkey_manager._get(f"himes:module:{mod_k}")
+                    if mod_data:
+                        tables_str = ", ".join(mod_data.get("primary_tables", [])[:6])
+                        workflows = "\n".join([f"• {wf}" for wf in mod_data.get("key_workflows", [])])
+                        reply = (
+                            f"**HIMES {mod_data.get('title')} Lifecycle Details:**\n\n"
+                            f"{mod_data.get('description')}\n\n"
+                            f"**Key SQL Tables:**\n`{tables_str}`\n\n"
+                            f"**Core Workflows:**\n{workflows}\n\n"
+                            f"*(⚡ Instant response powered by Valkey In-Memory Index)*"
+                        )
+                        update_session_memory(payload.session_id, payload.message, reply)
+                        valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
+                        return ChatResponse(
+                            status="success",
+                            reply=reply,
+                            model_used="Valkey In-Memory Cache (Sub-millisecond)",
+                            action_executed={
+                                "cache_hit": True,
+                                "source": "valkey_module_index",
+                                "namespace": f"himes:module:{mod_k}"
+                            }
+                        )
+
+        # 2. Check ChromaDB Semantic Cache (distance <= 0.30)
         # Note: Follow-up questions without explicit entities bypass cache to resolve against active session context
         has_entities_in_query = bool(v_m or m_m)
         is_followup = not has_entities_in_query and bool(sess["active_entities"].get("visit_no") or sess["active_entities"].get("mrn"))
@@ -514,6 +561,7 @@ def chat_with_agent(payload: ChatRequest):
             cached_result = check_semantic_cache(payload.message, threshold=0.30)
             if cached_result:
                 update_session_memory(payload.session_id, payload.message, cached_result["answer"])
+                valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
                 return ChatResponse(
                     status="success",
                     reply=cached_result["answer"],
@@ -525,18 +573,27 @@ def chat_with_agent(payload: ChatRequest):
                     }
                 )
 
-        # Build enriched context with session memory
+        # Build enriched context with session memory and Valkey Hybrid Search
         full_context = dict(payload.context or {})
         full_context["active_entities"] = dict(sess["active_entities"])
         full_context["previous_chat_turns"] = list(sess["turns"][-3:])
 
-        # 2. Run Autonomous Agent with live database and codebase tools
+        # Valkey Smart Hybrid Context enrichment
+        valkey_ctx = get_himes_context(payload.message, limit=2)
+        if valkey_ctx.get("context"):
+            full_context["valkey_knowledge"] = valkey_ctx["context"]
+
+        # Sync active session state into Valkey
+        valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
+
+        # 3. Run Autonomous Agent with live database and codebase tools
         agent_res = autonomous_agent.run(payload.message, full_context)
         reply_text = agent_res.get("reply", "No response generated.")
         actions_taken = agent_res.get("actions_taken", [])
 
         # Update session memory
         update_session_memory(payload.session_id, payload.message, reply_text)
+        valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
 
         # 3. Save into ChromaDB Semantic Cache for future instant lookups (skip follow-ups lacking standalone context)
         if not is_followup:

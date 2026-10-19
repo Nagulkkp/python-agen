@@ -17,3 +17,7 @@ paramiko>=3.4.0
 # Environment Variables & Data Validation
 python-dotenv>=1.0.1
 pydantic>=2.7.0
+
+# In-Memory Cache & State Store (Valkey / Redis)
+valkey>=6.2.0
+redis>=8.1.0
