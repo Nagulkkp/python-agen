@@ -76,7 +76,8 @@ def deploy_to_laravel():
         "php artisan route:list --name=agent.chat",
         working_dir=REMOTE_BASE
     )
-    print(f"   {route_list.strip()}")
+    safe_out = route_list.encode("ascii", errors="replace").decode("ascii")
+    print(f"   {safe_out.strip()}")
 
     sftp.close()
     client.close()

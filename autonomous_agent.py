@@ -526,18 +526,38 @@ HIMES ARCHITECTURE & DATABASE SCHEMA GUIDANCE:
           AND CAST(rrfi.Resource_Rate_For_Insurance_Start_Date AS DATE) <= CAST(GETDATE() AS DATE)
         ORDER BY rrfi.Resource_Rate_For_Insurance_Start_Date DESC
         ```
+- PHARMACY PATIENTS, MRNs, BILLS & OP PHARMACY SCREEN:
+  * In HIMES, Pharmacy patients can be registered separately with MRNs starting with 'PHAR' (e.g., PHAR2120, PHAR2119, PHAR2118):
+    - Table: `Pharmacy_Patient_Basic_Details`
+      * Column: `Pharmacy_Permanent_MRN_No` (e.g., 'PHAR2120') or `Pharmacy_Temporary_MRN_No`
+      * Demographic Columns: `Patient_First_Name`, `Patient_Last_Name`, `Contact_Phone_Mobile`
+    - Table: `Pharmacy_Patient_Visit_Basic_Details`
+      * Column: `Pharmacy_Permanent_Visit_No` (e.g., 3074)
+      * Primary Key: `Pharmacy_Patient_Visit_Basic_Details_Serial_No`
+    - Table: `Pharmacy_Patient_Bill_Header`
+      * Column: `Pharmacy_Patient_Visit_Basic_Details_Serial_No`
+      * Invoices: `Permanent_Invoice_No`, `Bill_Net_Value`, `Bill_Gross_Value`, `Bill_Date`
+    - Table: `Pharmacy_Patient_Bill_Detail_Items`
+      * Linked via `Stock_Item_Price_Serial_No` -> `Stock_Item_Price` -> `Item_Master` (`Item_Description`)
+      * Quantities & Amounts: `Service_Quantity`, `Derived_Net_Value`, `Patient_Share_Value`
+  * Global View of OP Pharmacy:
+    - Route: `/viewGlobalOPPharmacy`
+    - Controller: `GlobalViewIPPharmacyController@viewGlobalIPPharmacy` (Data method: `getGlobalFilterIPPharmacy`)
+    - Displays both Outpatient Clinic Prescriptions (`type = 'HA'`) and Direct Pharmacy Encounters (`type = 'PH'`).
+  * When searching for an MRN:
+    - ALWAYS check BOTH `patient_basic_details` (general hospital MRNs) AND `Pharmacy_Patient_Basic_Details` (for Pharmacy MRNs starting with PHAR)!
+
 - Best Strategy for Queries:
   1. Formulate the exact SELECT query based on the core tables above.
   2. You MUST execute the query using `execute_select_sql` to get the real live facts before giving the Final Answer!
   3. State the factual answers (e.g. Patient Name, Bill No, Net Amount, Billed status: pannittaanga / pannala, Deposit status, UI Receipt No, Receipt Amount, Active Services, Inventory Item prices, and Bed rates) clearly in friendly Tanglish.
 
 CONVERSATION CONTINUITY & CONTEXT INHERITANCE:
-- If the user asks a follow-up question (e.g. "bill pannalana, service configuration price edukka sonnene", "intha visit-oda service price enna?", "depoite ethuvum iruka illa receipt la tha bill pannirukangala?", "patient name enna?", "receipt details enna?") WITHOUT explicitly repeating the Visit Number or MRN:
-  * Check the ACTIVE ENTITIES and RECENT CHAT HISTORY provided in the Context!
-  * If an active visit_no (e.g. 16928, 16923) or mrn (e.g. 3004383) is present in ACTIVE ENTITIES or RECENT CHAT HISTORY, you MUST AUTOMATICALLY USE IT!
-  * NEVER ask the user: "Intha visit-oda service price-a check panna, enakku antha Visit Number venum" or ask for MRN/Visit number when it is already in ACTIVE ENTITIES or RECENT CHAT HISTORY!
-  * Immediately formulate and execute the SQL query using that active visit_no / MRN!
-  * Example: If visit_no is 16928 and user says "bill pannalana, service configuration price edukka sonnene", immediately query `Patient_Visit_Services` for active services in visit 16928, check if Cash or Insurance, fetch `Service_Rate_For_Non_Insurance` / `Service_Rate_For_Insurance` with `TOP 1 ... WHERE Start_Date <= GETDATE() ORDER BY Start_Date DESC`, and output the service prices directly!
+- Check ACTIVE APPLICATION SCREEN in Context! If the user is on a specific screen (e.g. `/viewGlobalOPPharmacy` - GLOBAL VIEW OF OP PHARMACY), tailor your explanation to that screen and controller.
+- IMPORTANT DISTINCTION:
+  * If the user is asking about a general HIMES Module, Screen, Menu, or Workflow (e.g., "pharmacy module ah paaru", "billing module pathi sollu", "price list menu enga iruku", "intha screen-a explain pannu", or referring to the ACTIVE APPLICATION SCREEN), do NOT force or assume a past visit_no from an old chat turn! Instead, explain the module, active screen (/viewGlobalOPPharmacy, GlobalViewIPPharmacyController, etc.), or ask what specific patient/visit on that screen they want to check.
+  * Only inherit active visit_no / mrn when the user is explicitly asking a visit-level follow-up (e.g., "intha visit-oda bill", "service price", "receipt details", "deposit iruka").
+- If the user asks a visit-level follow-up WITHOUT repeating the number, use the active visit_no / MRN from Context immediately.
 
 TOOLS AVAILABLE:
 1. `search_code(query="keyword", subpath="")`
@@ -562,10 +582,30 @@ Final Answer: <Your clear, friendly response to Nagul in Tanglish / Tamil + Engl
 
         context_guidance = ""
         if context:
+            # 1. Screen / Page Awareness
+            screen_info = []
+            if context.get("page_title"):
+                screen_info.append(f"Screen Title: {context.get('page_title')}")
+            if context.get("current_path"):
+                screen_info.append(f"Route Path: {context.get('current_path')}")
+            if context.get("selected_text"):
+                screen_info.append(f"User Highlighted Text: '{context.get('selected_text')}'")
+            if screen_info:
+                context_guidance += f"\nACTIVE APPLICATION SCREEN: {', '.join(screen_info)}."
+
+            # 2. Active conversation entities
             active_ents = context.get("active_entities", {})
             ents_list = [f"{k.upper()}: {v}" for k, v in active_ents.items() if v]
             if ents_list:
                 context_guidance += f"\nACTIVE ENTITIES IN RECENT CHAT: {', '.join(ents_list)}."
+
+            # 3. Hybrid knowledge
+            vk = context.get("valkey_knowledge")
+            if vk:
+                vk_str = json.dumps(vk, ensure_ascii=False) if isinstance(vk, (dict, list)) else str(vk)
+                context_guidance += f"\nHIMES KNOWLEDGE RETRIEVAL:\n{vk_str[:1200]}"
+
+            # 4. Recent turns
             turns = context.get("previous_chat_turns", [])
             if turns:
                 context_guidance += "\nRECENT CHAT HISTORY:\n"
@@ -574,7 +614,7 @@ Final Answer: <Your clear, friendly response to Nagul in Tanglish / Tamil + Engl
 
         history = [
             f"User Request: {user_task}\n"
-            f"Context: {context_guidance if context_guidance else json.dumps(context or {})}\n"
+            f"Context: {context_guidance.strip() if context_guidance else json.dumps(context or {})}\n"
             f"Begin your investigation!"
         ]
         actions_taken = []

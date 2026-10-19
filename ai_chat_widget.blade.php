@@ -360,6 +360,11 @@
       headers["X-CSRF-TOKEN"] = csrfToken;
     }
 
+    // Extract live page context dynamically so the AI knows exactly where the user is
+    const pageTitleElem = document.querySelector('.page-title, h1, .title, .content-header, .module-title');
+    const pageTitle = pageTitleElem ? pageTitleElem.innerText.trim() : (document.title || "");
+    const selectedText = (window.getSelection && window.getSelection()) ? window.getSelection().toString().trim() : "";
+
     const payload = JSON.stringify({
       message: task,
       task: task,
@@ -368,7 +373,11 @@
       context: {
         app: "himes-ai",
         path: "/L9/nagul/himes-ai",
-        user: "nagul"
+        user: "nagul",
+        current_url: window.location.href,
+        current_path: window.location.pathname,
+        page_title: pageTitle,
+        selected_text: selectedText
       }
     });
 

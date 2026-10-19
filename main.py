@@ -452,32 +452,31 @@ def get_session_context(session_id: str) -> dict:
         }
     return SESSION_MEMORY[session_id]
 
+def extract_entities_from_text(text: str) -> dict:
+    entities = {}
+    v_m = re.search(r'\b(?:visit|visit\s*no|visit\s*number)[:\s#]*([0-9]{4,8})\b', text, re.IGNORECASE)
+    if v_m:
+        entities["visit_no"] = v_m.group(1)
+        
+    m_m = re.search(r'\b(?:mrn|patient\s*id)[:\s#]*([A-Za-z0-9_-]{4,15})\b', text, re.IGNORECASE)
+    if not m_m:
+        m_m = re.search(r'\b(PHAR[0-9]+)\b', text, re.IGNORECASE)
+    if m_m:
+        entities["mrn"] = m_m.group(1)
+        
+    b_m = re.search(r'\b(?:bill|bill\s*no|invoice)[:\s#]*([0-9]{4,8})\b', text, re.IGNORECASE)
+    if b_m:
+        entities["bill_no"] = b_m.group(1)
+    return entities
+
 def update_session_memory(session_id: str, user_msg: str, agent_reply: str):
     sess = get_session_context(session_id)
     
-    # Extract entities from user message
-    v_m = re.search(r'\b(?:visit|visit\s*no|visit\s*number)[:\s#]*([0-9]{4,8})\b', user_msg, re.IGNORECASE)
-    if v_m:
-        sess["active_entities"]["visit_no"] = v_m.group(1)
-        
-    m_m = re.search(r'\b(?:mrn|patient\s*id)[:\s#]*([0-9]{5,10})\b', user_msg, re.IGNORECASE)
-    if m_m:
-        sess["active_entities"]["mrn"] = m_m.group(1)
-
-    b_m = re.search(r'\b(?:bill|bill\s*no|invoice)[:\s#]*([0-9]{4,8})\b', user_msg, re.IGNORECASE)
-    if b_m:
-        sess["active_entities"]["bill_no"] = b_m.group(1)
-
-    # Extract entities from agent reply if missing
-    if agent_reply:
-        if not sess["active_entities"]["visit_no"]:
-            v_rep = re.search(r'\b(?:visit\s*no|visit\s*number)[:\s*#]*([0-9]{4,8})\b', agent_reply, re.IGNORECASE)
-            if v_rep:
-                sess["active_entities"]["visit_no"] = v_rep.group(1)
-        if not sess["active_entities"]["mrn"]:
-            m_rep = re.search(r'\bmrn[:\s*#]*([0-9]{5,10})\b', agent_reply, re.IGNORECASE)
-            if m_rep:
-                sess["active_entities"]["mrn"] = m_rep.group(1)
+    # Extract entities from user message only (prevents agent hallucinations from sticking)
+    ents = extract_entities_from_text(user_msg)
+    for k, v in ents.items():
+        if v:
+            sess["active_entities"][k] = v
 
     sess["turns"].append({"user": user_msg, "agent": agent_reply})
     if len(sess["turns"]) > 6:
@@ -505,12 +504,12 @@ def chat_with_agent(payload: ChatRequest):
         # Retrieve and update session context
         sess = get_session_context(payload.session_id)
         # Pre-scan user message for any entity updates
-        v_m = re.search(r'\b(?:visit|visit\s*no|visit\s*number)[:\s#]*([0-9]{4,8})\b', payload.message, re.IGNORECASE)
-        if v_m:
-            sess["active_entities"]["visit_no"] = v_m.group(1)
-        m_m = re.search(r'\b(?:mrn|patient\s*id)[:\s#]*([0-9]{5,10})\b', payload.message, re.IGNORECASE)
-        if m_m:
-            sess["active_entities"]["mrn"] = m_m.group(1)
+        user_ents = extract_entities_from_text(payload.message)
+        for k, v in user_ents.items():
+            if v:
+                sess["active_entities"][k] = v
+        v_m = user_ents.get("visit_no")
+        m_m = user_ents.get("mrn")
 
         # 1. Valkey Fast-Path: Menu Navigation Lookup
         msg_lower = payload.message.lower()
@@ -614,7 +613,14 @@ def chat_with_agent(payload: ChatRequest):
 
         # Build enriched context with session memory and Valkey Hybrid Search
         full_context = dict(payload.context or {})
-        full_context["active_entities"] = dict(sess["active_entities"])
+
+        # Determine if query is a general module or screen inquiry rather than a visit follow-up
+        is_module_or_screen_query = any(w in msg_lower for w in ["module", "screen", "menu", "workflow", "lifecycle", "page", "viewglobal", "view"]) and not bool(v_m)
+        active_ents_to_pass = dict(sess["active_entities"])
+        if is_module_or_screen_query:
+            active_ents_to_pass["visit_no"] = None  # Prevent old visit from hijacking module questions
+
+        full_context["active_entities"] = active_ents_to_pass
         full_context["previous_chat_turns"] = list(sess["turns"][-3:])
 
         # Valkey Smart Hybrid Context enrichment
