@@ -550,18 +550,54 @@ def chat_with_agent(payload: ChatRequest):
                 }
             )
 
-        # 1b. Valkey Fast-Path: Instant Module Lifecycle & Flow lookup
-        is_module_query = any(phrase in msg_lower for phrase in ["flow", "lifecycle", "process", "explain", "tables", "how does", "steps for", "pathina", "workflow", "eclaim", "claim", "pa_"])
+        # 1a. Valkey Fast-Path: Active Application Screen Lookup
+        current_path = (payload.context or {}).get("current_path", "")
+        clean_route = current_path.strip("/").split("/")[-1].lower() if current_path else ""
+        refers_to_current_screen = any(w in msg_lower for w in ["intha screen", "this screen", "current screen", "intha page", "this page", "screen ah", "screen-a", "screen pathi", "module ah paaru", "screen ah paaru"]) or (clean_route and clean_route in msg_lower)
+        
+        if clean_route and refers_to_current_screen and not bool(v_m or m_m):
+            screen_data = valkey_manager._get(f"himes:screen:{clean_route}")
+            if screen_data:
+                tables_str = ", ".join(screen_data.get("tables", [])[:6])
+                reply = (
+                    f"**HIMES Active Screen Overview: {screen_data.get('title')}**\n\n"
+                    f"• **Route Path:** `/{clean_route}`\n"
+                    f"• **Primary Controller:** `{screen_data.get('controller')}`\n"
+                    f"• **Domain Module:** `{screen_data.get('module').upper()}`\n\n"
+                    f"**Screen Purpose & Functionality:**\n"
+                    f"{screen_data.get('description')}\n\n"
+                    f"**Associated SQL Tables:**\n"
+                    f"`{tables_str}`\n\n"
+                    f"*(⚡ Instant response powered by Valkey Screen Route Index)*"
+                )
+                update_session_memory(payload.session_id, payload.message, reply)
+                return ChatResponse(
+                    status="success",
+                    reply=reply,
+                    model_used="Valkey In-Memory Cache (Sub-millisecond)",
+                    action_executed={
+                        "cache_hit": True,
+                        "source": "valkey_screen_index",
+                        "namespace": f"himes:screen:{clean_route}"
+                    }
+                )
+
+        # 1b. Valkey Fast-Path: Instant Module Lifecycle & Flow lookup (All 12 HIMES Domains)
+        is_module_query = any(phrase in msg_lower for phrase in ["flow", "lifecycle", "process", "explain", "tables", "how does", "steps for", "pathina", "workflow", "eclaim", "claim", "pa_", "module", "paaru"])
         if is_module_query:
             module_map = {
-                "prior_visit": ["prior visit", "prior_visit", "pa_patient", "pa_insurance"],
-                "prior_authorization": ["prior authorization", "prior auth", "pa approval", "pre-authorization"],
-                "pharmacy_pa": ["pharmacy pa", "pharmacy", "prescription authorization", "medicine coverage"],
-                "insurance": ["claim", "claims", "eclaim", "remittance", "batch submission"],
-                "billing": ["billing flow", "invoice generation", "co-pay", "credit note", "tariff"],
-                "emr": ["emr", "doctor notes", "vitals", "clinical workflow", "diagnoses"],
-                "registration": ["registration flow", "demographics", "eligibility check"],
-                "masters": ["master configuration", "icd list", "user permissions"]
+                "lis": ["lis", "lab", "laboratory", "specimen", "pathology", "sample accession"],
+                "ris": ["ris", "radiology", "pacs", "dicom", "xray", "mri", "ct scan", "imaging"],
+                "emr_panels": ["emr panels", "emr panel", "emr", "clinical panel", "doctor panel", "nursing", "specialty panel", "vitals", "chief complaint"],
+                "masters_400": ["masters", "master", "400 master", "masters page", "tariff setup", "service master", "bulk master"],
+                "billing": ["billing flow", "billing", "invoice generation", "co-pay", "copay", "deductible", "cashier"],
+                "pharmacy": ["pharmacy module", "pharmacy", "drug dispensing", "op pharmacy", "ip pharmacy", "formulary", "medicine"],
+                "invoice_posting": ["invoice posting", "posting to ledger", "tally export", "quickbook export", "financial ledger", "ledger"],
+                "credit_notes": ["credit note", "credit notes", "refund", "bill cancellation", "credit voucher"],
+                "claim_management": ["claim", "claims", "eclaim", "remittance", "era 835", "dhpo", "shafafiya", "waseel", "malaffi", "batch submission"],
+                "prior_visit": ["prior visit", "prior_visit", "pa_patient", "pa_insurance", "pre-authorization", "prior auth"],
+                "cron_jobs": ["cron", "cron job", "scheduled job", "background job", "kernel schedule", "reportschedulecron"],
+                "registration": ["registration flow", "registration", "emirates id", "appointment scheduler", "queue"]
             }
 
             for mod_k, patterns in module_map.items():

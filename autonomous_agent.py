@@ -528,24 +528,64 @@ HIMES ARCHITECTURE & DATABASE SCHEMA GUIDANCE:
         ```
 - PHARMACY PATIENTS, MRNs, BILLS & OP PHARMACY SCREEN:
   * In HIMES, Pharmacy patients can be registered separately with MRNs starting with 'PHAR' (e.g., PHAR2120, PHAR2119, PHAR2118):
-    - Table: `Pharmacy_Patient_Basic_Details`
-      * Column: `Pharmacy_Permanent_MRN_No` (e.g., 'PHAR2120') or `Pharmacy_Temporary_MRN_No`
-      * Demographic Columns: `Patient_First_Name`, `Patient_Last_Name`, `Contact_Phone_Mobile`
-    - Table: `Pharmacy_Patient_Visit_Basic_Details`
-      * Column: `Pharmacy_Permanent_Visit_No` (e.g., 3074)
-      * Primary Key: `Pharmacy_Patient_Visit_Basic_Details_Serial_No`
-    - Table: `Pharmacy_Patient_Bill_Header`
-      * Column: `Pharmacy_Patient_Visit_Basic_Details_Serial_No`
-      * Invoices: `Permanent_Invoice_No`, `Bill_Net_Value`, `Bill_Gross_Value`, `Bill_Date`
-    - Table: `Pharmacy_Patient_Bill_Detail_Items`
-      * Linked via `Stock_Item_Price_Serial_No` -> `Stock_Item_Price` -> `Item_Master` (`Item_Description`)
-      * Quantities & Amounts: `Service_Quantity`, `Derived_Net_Value`, `Patient_Share_Value`
+    - Table: `Pharmacy_Patient_Basic_Details` (Columns: `Pharmacy_Permanent_MRN_No`, `Pharmacy_Temporary_MRN_No`, `Patient_First_Name`, `Patient_Last_Name`, `Contact_Phone_Mobile`)
+    - Table: `Pharmacy_Patient_Visit_Basic_Details` (Columns: `Pharmacy_Permanent_Visit_No`, `Pharmacy_Patient_Visit_Basic_Details_Serial_No`, `Patient_Visit_Registered_Date_Time`)
+    - Table: `Pharmacy_Patient_Bill_Header` (Columns: `Permanent_Invoice_No`, `Bill_Net_Value`, `Bill_Gross_Value`, `Bill_Date`, `Is_Bill_Finalized`)
+    - Table: `Pharmacy_Patient_Bill_Detail_Items` (Linked via `Stock_Item_Price_Serial_No` -> `Stock_Item_Price` -> `Item_Master` (`Item_Description`), `Service_Quantity`, `Derived_Net_Value`, `Patient_Share_Value`)
   * Global View of OP Pharmacy:
     - Route: `/viewGlobalOPPharmacy`
     - Controller: `GlobalViewIPPharmacyController@viewGlobalIPPharmacy` (Data method: `getGlobalFilterIPPharmacy`)
     - Displays both Outpatient Clinic Prescriptions (`type = 'HA'`) and Direct Pharmacy Encounters (`type = 'PH'`).
   * When searching for an MRN:
     - ALWAYS check BOTH `patient_basic_details` (general hospital MRNs) AND `Pharmacy_Patient_Basic_Details` (for Pharmacy MRNs starting with PHAR)!
+
+- LABORATORY (LIS) & RADIOLOGY (RIS) WORKFLOWS:
+  * LIS (Lab Orders & Results):
+    - Table: `Patient_Visit_Lab_Order` (Lab orders linked to patient visit)
+    - Table: `Lab_Order_Item_Result` (Numeric results, reference ranges, panic alerts)
+    - Table: `Lab_Specimen_Details` (Barcodes & accessioning)
+    - Controllers: `LabOrderController`, `BarcodeController`, `LISResultEntryController`, `LISVerificationController`
+    - Key Route: `/viewGlobalLIS`
+  * RIS (Radiology Orders & PACS/DICOM):
+    - Table: `Patient_Visit_Radiology_Order` (Imaging requests)
+    - Table: `Radiology_Report_Details` (Radiologist diagnosis, impression, findings)
+    - Controller: `EmrRadiologyReportController`, `RadiologyOrderController`
+    - Key Route: `/viewGlobalRIS`
+
+- 100+ EMR SPECIALTY PANELS & CLINICAL DOCUMENTATION:
+  * Tables: `Patient_Visit_Clinical_Notes`, `Patient_Visit_ICD_Codes` (Primary & Secondary ICD-10), `Patient_Visit_Vitals`, `Patient_Visit_Allergy_Details`
+  * Controllers: `EMRVisitEntryPanelController`, `EMRCCHPIChiefcomplaintController`, `EMRAllergiesController`, `EmrVitalFactorsController`, `EMRVisitSummarynewController`
+  * Panels: Dental (`DEN`), Anesthesia (`AnesthesiaRecordFormPanelController`), Physiotherapy (`PHY`), Urgent Care (`URC`), Cardiology, OB/GYN, Pediatrics, Fall Risk.
+  * Key Routes: `/emrVisitEntryPanel`, `/viewEMRWaitingList`, `/emrChiefComplaint`, `/emrAllergies`.
+
+- 400+ MASTERS, TARIFFS & PRICE LISTS:
+  * Services & Insurance Tariffs: `InsurancePriceListManagementController` (`/priceListManagement`), tables: `Service_Rate_For_Non_Insurance`, `Resource_Rate_For_Insurance`, `Service_USSDB`.
+  * Pharmacy Inventory Pricing: `InventoryPriceListManagementController` (`/ViewInventoryPriceListManagement`), tables: `Stock_Item_Price`, `Item_Master`.
+  * Bed & Resource Rules: `PriceRuleForResourcesController` (`/PriceRuleForResources`), table: `Price_Rule_For_Resources`.
+  * Master Logs: `AllMasterLogsController` (audits all changes across 400+ master setups).
+
+- INVOICE POSTING, FINANCIAL LEDGER & ERP EXPORT:
+  * Tables: `Ledger_Transactions`, `Patient_Bill_Header`, `Pharmacy_Patient_Bill_Header`, `GL_Account_Master`
+  * Controllers: `GlobalViewInvoicePostController` (`/viewGlobalInvoicePost`), `HMCTallyInvoiceExportController` (Tally XML), `QuickBookExportController` / `PharmacyQuickBookExportController` (QuickBooks export).
+  * Rule: Bills must have `Is_Bill_Finalized = 'C'` before ledger posting (`Is_Bill_Posted_To_Ledger = 'Y'`).
+
+- CREDIT NOTES & REFUNDS:
+  * Tables: `Credit_Note_Header`, `Credit_Note_Details`, `Patient_Bill_Refund_Details`, `Pharmacy_Refund_Bill_Header`
+  * Controllers: `GlobalViewCreditNoteController` (`/globalViewCreditNote`), `DebitCreditNoteController` (`/debitCreditNote`).
+  * Manages service cancellations, deposit refunds, and tax invoice reversals.
+
+- CLAIMS MANAGEMENT & E-CLAIMS:
+  * Tables: `claim_details`, `claim_detail_icd`, `claim_details_submitted`, `claim_batch_header`, `claim_remittance_advice` (ERA 835)
+  * Controllers: `AutoEclaimPostController` (`/eclaimManagement`), `ClaimBulkReSubmissionController`, `BranchEClaimController`
+  * Submissions to DHPO, Shafafiya, Waseel, Malaffi; parses 835 Remittance Advice for paid vs denied amounts.
+
+- CRON JOBS & AUTOMATED BACKGROUND TASKS:
+  * Scheduled in `app/Console/Kernel.php`:
+    - `ReportScheduleCron`: Every minute dispatches scheduled MIS reports (`Himes_Reports_Schedule_Details`).
+    - `AppointmentUpdateNoShow`: Every 10 mins auto-flags missed appointments.
+    - `AutoEclaimPostCron`: Automated nightly insurance claim batch generation.
+    - `QuickBookPost` & `PharmcyQuickBookPost`: Daily at 5:00 AM posts revenue batches.
+    - `JobExecutionLogs`: Tracks status of all background jobs.
 
 - Best Strategy for Queries:
   1. Formulate the exact SELECT query based on the core tables above.
