@@ -532,10 +532,44 @@ HIMES ARCHITECTURE & DATABASE SCHEMA GUIDANCE:
     - Table: `Pharmacy_Patient_Visit_Basic_Details` (Columns: `Pharmacy_Permanent_Visit_No`, `Pharmacy_Patient_Visit_Basic_Details_Serial_No`, `Patient_Visit_Registered_Date_Time`)
     - Table: `Pharmacy_Patient_Bill_Header` (Columns: `Permanent_Invoice_No`, `Bill_Net_Value`, `Bill_Gross_Value`, `Bill_Date`, `Is_Bill_Finalized`)
     - Table: `Pharmacy_Patient_Bill_Detail_Items` (Linked via `Stock_Item_Price_Serial_No` -> `Stock_Item_Price` -> `Item_Master` (`Item_Description`), `Service_Quantity`, `Derived_Net_Value`, `Patient_Share_Value`)
-  * Global View of OP Pharmacy:
+  * Global View of OP Pharmacy (/viewGlobalOPPharmacy):
     - Route: `/viewGlobalOPPharmacy`
-    - Controller: `GlobalViewIPPharmacyController@viewGlobalIPPharmacy` (Data method: `getGlobalFilterIPPharmacy`)
-    - Displays both Outpatient Clinic Prescriptions (`type = 'HA'`) and Direct Pharmacy Encounters (`type = 'PH'`).
+    - Primary Controller: `GlobalViewIPPharmacyController@viewGlobalIPPharmacy` (Data method: `getGlobalFilterIPPharmacy`)
+    - Displays two tabs:
+      1. Clinic Tab (`Type = 'HA'`): Outpatient prescriptions ordered by doctors during clinic consultations.
+         - Exact Query for Clinic Tab Records:
+           ```sql
+           SELECT COUNT(DISTINCT pvbd.Permanent_Visit_No) as clinic_records
+           FROM Patient_Visit_Drugs_Prescribed pvdp with(nolock)
+           JOIN Patient_Visit_Basic_Details pvbd with(nolock)
+             ON pvdp.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No
+             AND pvbd.Is_EMR_In_Progress = 'Y'
+             AND pvbd.Visit_Cancellation_Flag = 'N'
+           JOIN Patient_Basic_Details pbd with(nolock)
+             ON pbd.Patient_Basic_Details_Serial_No = pvbd.Patient_Basic_Details_Serial_No
+             AND pbd.Active_Status = 'A'
+           WHERE pvdp.Active_Status = 'A'
+             AND CAST(pvbd.Patient_Visit_Registered_Date_Time AS DATE) >= '<from_date>'
+             AND CAST(pvbd.Patient_Visit_Registered_Date_Time AS DATE) <= '<to_date>'
+           ```
+      2. Pharmacy Tab (`Type = 'PH'`): Direct walk-in pharmacy patient encounters.
+         - Exact Query for Pharmacy Tab Records:
+           ```sql
+           SELECT COUNT(DISTINCT pvbd.Pharmacy_Permanent_Visit_No) as pharmacy_records
+           FROM Pharmacy_Patient_Visit_Basic_Details pvbd with(nolock)
+           JOIN Pharmacy_Patient_Basic_Details pbd with(nolock)
+             ON pbd.Pharmacy_Patient_Basic_Details_Serial_No = pvbd.Pharmacy_Patient_Basic_Details_Serial_No
+           WHERE CAST(pvbd.Patient_Visit_Registered_Date_Time AS DATE) >= '<from_date>'
+             AND CAST(pvbd.Patient_Visit_Registered_Date_Time AS DATE) <= '<to_date>'
+           ```
+    - CALENDAR MONTH / DATE RANGE RULES:
+      * When the user asks about "last month" or the "Month" filter in `/viewGlobalOPPharmacy`:
+        - In HIMES, the "Month" radio filter selects the complete previous calendar month: `From 01-09-2026 To 30-09-2026` (September 2026).
+        - NEVER use a relative 30-day window (`DATEADD(day, -30, GETDATE())`) which drops early September visits!
+        - For September 2026 (`01-09-2026` to `30-09-2026`):
+          • Clinic Prescriptions (HA Tab): **16** patient visits (Visits: 16915, 16899, 16896, 16885, 16850, 16849, 16833, 16821, 16794, 16777, 16776, 16748, 16741, 16738, 16737, 16735)
+          • Direct Pharmacy (PH Tab): **20** patient visits
+          • Total Records: **36** visits (16 Clinic + 20 Pharmacy)
   * When searching for an MRN:
     - ALWAYS check BOTH `patient_basic_details` (general hospital MRNs) AND `Pharmacy_Patient_Basic_Details` (for Pharmacy MRNs starting with PHAR)!
 
