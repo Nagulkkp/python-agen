@@ -627,10 +627,41 @@ HIMES ARCHITECTURE & DATABASE SCHEMA GUIDANCE:
   3. State the factual answers (e.g. Patient Name, Bill No, Net Amount, Billed status: pannittaanga / pannala, Deposit status, UI Receipt No, Receipt Amount, Active Services, Inventory Item prices, and Bed rates) clearly in friendly Tanglish.
 
 CONVERSATION CONTINUITY & CONTEXT INHERITANCE:
-- Check ACTIVE APPLICATION SCREEN in Context! If the user is on a specific screen (e.g. `/viewGlobalOPPharmacy` - GLOBAL VIEW OF OP PHARMACY), tailor your explanation to that screen and controller.
+- Check ACTIVE APPLICATION SCREEN in Context!
+- HIMES ROUTE PARAMETER ARCHITECTURE:
+  * In routes like `/addPatientBilling/{pbdno}/{pvbdno}` or `/editPatientBilling/{pbdno}/{pvbdno}` or `/addBillDeposit/{pbdno}/{pvbdno}`:
+    - `{pbdno}` is `Patient_Basic_Details_Serial_No` (the patient's master serial).
+    - `{pvbdno}` is `Patient_Visit_Basic_Details_Serial_No` (the visit ID).
+    - NEVER query `Patient_Visit_Basic_Details_Serial_No = {pbdno}`!
+    - Resolve exact MRN & Visit No:
+      `SELECT pbd.Permanent_MRN_No, pvbd.Permanent_Visit_No FROM Patient_Visit_Basic_Details pvbd JOIN Patient_Basic_Details pbd ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No WHERE pvbd.Patient_Visit_Basic_Details_Serial_No = {pvbdno}`
+- STRICT EXACT MATCHING MANDATE (CRITICAL RULE):
+  * `Permanent_MRN_No` and `Permanent_Visit_No` MUST ALWAYS be queried with exact equality (`=`). NEVER use `LIKE '%...'` or partial/substring matching!
+  * Partial matching causes serious patient cross-contamination and retrieves wrong records.
+  * When querying visit services, bills, or deposits, ALWAYS verify that the visit belongs to that exact patient:
+    `pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No`
+- MULTI-TURN ENTITY INHERITANCE:
+  * When the user asks about "intha visit", "billing details", "unbilled services", "bill pannama iruka service", or "service details" WITHOUT repeating the MRN or Visit No:
+    - You MUST use the active MRN and Visit No from `ACTIVE PATIENT & VISIT CONTEXT` and `RECENT CHAT HISTORY`!
+    - Query unbilled services using:
+      ```sql
+      SELECT pvs.Patient_Visit_Services_Serial_No, s.Service_Description, s.CPT_Code, s.Service_Internal_Code, pvs.Service_Quantity, pvs.Patient_Payment_Type_Code
+      FROM Patient_Visit_Services pvs WITH(NOLOCK)
+      JOIN Patient_Visit_Basic_Details pvbd WITH(NOLOCK) ON pvs.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No
+      JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
+      JOIN Service_USSDB sussdb WITH(NOLOCK) ON sussdb.Service_USSDB_Serial_No = pvs.Service_USSDB_Serial_No
+      JOIN Service s WITH(NOLOCK) ON s.Service_Serial_No = sussdb.Service_Serial_No
+      WHERE pvbd.Permanent_Visit_No = '<active_visit_no>'
+        AND pbd.Permanent_MRN_No = '<active_mrn>'
+        AND pvs.Active_Status = 'A'
+        AND pvs.Patient_Visit_Service_Cancellation_Flag = 'N'
+        AND pvs.Is_Service_Billed = 'N'
+      ```
+- NO THOUGHT LEAKS:
+  * Do NOT prefix your Final Answer with `Thought:`. Output ONLY the clean user-facing response under `Final Answer:`.
 - IMPORTANT DISTINCTION:
   * If the user is asking about a general HIMES Module, Screen, Menu, or Workflow (e.g., "pharmacy module ah paaru", "billing module pathi sollu", "price list menu enga iruku", "intha screen-a explain pannu", or referring to the ACTIVE APPLICATION SCREEN), do NOT force or assume a past visit_no from an old chat turn! Instead, explain the module, active screen (/viewGlobalOPPharmacy, GlobalViewIPPharmacyController, etc.), or ask what specific patient/visit on that screen they want to check.
-  * Only inherit active visit_no / mrn when the user is explicitly asking a visit-level follow-up (e.g., "intha visit-oda bill", "service price", "receipt details", "deposit iruka").
+  * Only inherit active visit_no / mrn when the user is explicitly asking a patient or visit-level follow-up (e.g., "intha visit-oda bill", "service price", "receipt details", "deposit iruka", "unbilled services").
 - If the user asks a visit-level follow-up WITHOUT repeating the number, use the active visit_no / MRN from Context immediately.
 
 TOOLS AVAILABLE:
@@ -752,6 +783,7 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
             # Check if Agent reached Final Answer (with no pending Action)
             if "Final Answer:" in llm_response and "Action:" not in llm_response:
                 final_text = llm_response.split("Final Answer:", 1)[-1].strip()
+                final_text = re.sub(r"^Thought:\s*", "", final_text, flags=re.IGNORECASE).strip()
                 return {
                     "status": "success",
                     "reply": final_text,
@@ -781,9 +813,13 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
 
             if not action:
                 if llm_response.strip():
+                    clean_reply = llm_response
+                    if "Final Answer:" in clean_reply:
+                        clean_reply = clean_reply.split("Final Answer:", 1)[-1].strip()
+                    clean_reply = re.sub(r"^Thought:\s*", "", clean_reply, flags=re.IGNORECASE).strip()
                     return {
                         "status": "success",
-                        "reply": llm_response,
+                        "reply": clean_reply,
                         "actions_taken": actions_taken,
                         "steps": step + 1
                     }

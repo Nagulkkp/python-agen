@@ -473,11 +473,56 @@ def extract_entities_from_text(text: str) -> dict:
         entities["bill_no"] = b_m.group(1)
     return entities
 
-def update_session_memory(session_id: str, user_msg: str, agent_reply: str):
+def resolve_himes_screen_entities(context: dict) -> dict:
+    """
+    Extracts and resolves exact patient MRN and Visit No from HIMES screen URLs.
+    Handles routes like:
+      - /addPatientBilling/{pbdno}/{pvbdno}
+      - /editPatientBilling/{pbdno}/{pvbdno}
+      - /addBillDeposit/{pbdno}/{pvbdno}
+      - /addRefundBill/{pbdno}/{pvbdno}
+    where pbdno is Patient_Basic_Details_Serial_No and pvbdno is Patient_Visit_Basic_Details_Serial_No.
+    """
+    if not context or not isinstance(context, dict):
+        return {}
+    current_path = context.get("current_path") or context.get("current_url") or ""
+    if not current_path:
+        return {}
+
+    m = re.search(r'/(?:addPatientBilling|editPatientBilling|addBillDeposit|addRefundBill|pharmacyaddRefundBill)/(\d+)/(\d+)', current_path, re.IGNORECASE)
+    if m:
+        pbd_no = m.group(1)
+        pvbd_no = m.group(2)
+        try:
+            sql = f"""
+            SELECT TOP 1 pbd.Permanent_MRN_No, pvbd.Permanent_Visit_No, pbd.Patient_Basic_Details_Serial_No, pvbd.Patient_Visit_Basic_Details_Serial_No
+            FROM Patient_Visit_Basic_Details pvbd WITH(NOLOCK)
+            JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
+            WHERE pvbd.Patient_Visit_Basic_Details_Serial_No = {pvbd_no}
+            """
+            raw = autonomous_agent.execute_select_sql(sql)
+            if raw and raw.startswith("["):
+                data = json.loads(raw)
+                if data and isinstance(data, list) and len(data) > 0:
+                    return {
+                        "mrn": str(data[0].get("Permanent_MRN_No", "")).strip(),
+                        "visit_no": str(data[0].get("Permanent_Visit_No", "")).strip(),
+                        "patient_serial": str(pbd_no),
+                        "visit_serial": str(pvbd_no)
+                    }
+        except Exception as e:
+            print(f"[ScreenResolver] Error resolving screen visit: {e}")
+    return {}
+
+def update_session_memory(session_id: str, user_msg: str, agent_reply: str, entities: Optional[dict] = None):
     sess = get_session_context(session_id)
     
     # Extract entities from user message only (prevents agent hallucinations from sticking)
     ents = extract_entities_from_text(user_msg)
+    if entities and isinstance(entities, dict):
+        for k, v in entities.items():
+            if v:
+                sess["active_entities"][k] = v
     for k, v in ents.items():
         if v:
             sess["active_entities"][k] = v
@@ -504,6 +549,12 @@ def format_user_mode_response(reply: str) -> str:
         return reply
 
     text = reply
+
+    # 0. Strip any internal Thought prefix or Final Answer prefix
+    text = re.sub(r'^Thought:\s*', '', text, flags=re.IGNORECASE).strip()
+    if 'Final Answer:' in text:
+        text = text.split('Final Answer:', 1)[-1].strip()
+        text = re.sub(r'^Thought:\s*', '', text, flags=re.IGNORECASE).strip()
 
     # 1. Replace raw SQL code blocks with verified database status card
     text = re.sub(
@@ -659,6 +710,18 @@ def chat_with_agent(payload: ChatRequest):
 
         effective_message = payload.message + attachment_context
 
+        # Resolve screen-level entities from active URL if user is viewing a patient/billing screen
+        screen_ents = resolve_himes_screen_entities(payload.context)
+        if screen_ents:
+            if screen_ents.get("mrn") and not sess["active_entities"].get("mrn"):
+                sess["active_entities"]["mrn"] = screen_ents["mrn"]
+            if screen_ents.get("visit_no") and not sess["active_entities"].get("visit_no"):
+                sess["active_entities"]["visit_no"] = screen_ents["visit_no"]
+            if screen_ents.get("visit_serial"):
+                sess["active_entities"]["visit_serial"] = screen_ents["visit_serial"]
+            if screen_ents.get("patient_serial"):
+                sess["active_entities"]["patient_serial"] = screen_ents["patient_serial"]
+
         # Pre-scan user message for any entity updates
         user_ents = extract_entities_from_text(payload.message)
         for k, v in user_ents.items():
@@ -666,6 +729,119 @@ def chat_with_agent(payload: ChatRequest):
                 sess["active_entities"][k] = v
         v_m = user_ents.get("visit_no")
         m_m = user_ents.get("mrn")
+        
+        # If user explicitly specified a new MRN in this message and did not specify a visit_no,
+        # reset visit_no so it queries this new MRN's visits instead of holding old patient visit
+        if m_m and not v_m:
+            sess["active_entities"]["visit_no"] = None
+
+        active_mrn = sess["active_entities"].get("mrn")
+        active_visit = sess["active_entities"].get("visit_no")
+        msg_lower = payload.message.lower()
+
+        # If user asks about visit, billing, services, or unbilled items without giving a visit number,
+        # inherit the active MRN and auto-resolve the latest visit for that patient if visit_no was unset
+        is_visit_level_query = any(w in msg_lower for w in ["visit", "billing", "bill", "service", "services", "deposit", "receipt", "unbilled", "un-billed", "cpt"])
+        if active_mrn and not active_visit and is_visit_level_query:
+            # First check if the screen URL provided the visit
+            if screen_ents and screen_ents.get("visit_no") and screen_ents.get("mrn") == active_mrn:
+                active_visit = screen_ents["visit_no"]
+                sess["active_entities"]["visit_no"] = active_visit
+                sess["active_entities"]["visit_serial"] = screen_ents.get("visit_serial")
+            else:
+                try:
+                    v_sql = f"""
+                    SELECT TOP 1 pvbd.Permanent_Visit_No, pvbd.Patient_Visit_Basic_Details_Serial_No
+                    FROM Patient_Visit_Basic_Details pvbd WITH(NOLOCK)
+                    JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
+                    WHERE pbd.Permanent_MRN_No = '{active_mrn}'
+                    ORDER BY pvbd.Patient_Visit_Basic_Details_Serial_No DESC
+                    """
+                    v_raw = autonomous_agent.execute_select_sql(v_sql)
+                    if v_raw and v_raw.startswith("["):
+                        v_data = json.loads(v_raw)
+                        if v_data and len(v_data) > 0:
+                            active_visit = str(v_data[0].get("Permanent_Visit_No", "")).strip()
+                            sess["active_entities"]["visit_no"] = active_visit
+                            sess["active_entities"]["visit_serial"] = str(v_data[0].get("Patient_Visit_Basic_Details_Serial_No", "")).strip()
+                except Exception as e:
+                    print(f"[EntityResolution] Error fetching latest visit for MRN {active_mrn}: {e}")
+
+        # Dedicated Handler 0: Unbilled Services Inquiry for Active Patient & Visit
+        is_unbilled_service_query = (
+            any(w in msg_lower for w in ["bill pannama", "unbilled", "un-billed", "bill aagala", "bill pannaatha", "pending service", "pending services"])
+            or (any(w in msg_lower for w in ["service", "services"]) and any(w in msg_lower for w in ["bill pannama", "bill innum pannalana", "not billed", "bill pannala"]))
+        )
+        if is_unbilled_service_query and active_visit and active_mrn:
+            srv_sql = f"""
+            SELECT 
+                pvbd.Permanent_Visit_No,
+                pbd.Permanent_MRN_No,
+                pvs.Patient_Visit_Services_Serial_No,
+                pvs.Is_Service_Billed,
+                pvs.Service_Quantity,
+                s.Service_Description,
+                s.CPT_Code,
+                s.Service_Internal_Code,
+                pvs.Patient_Payment_Type_Code
+            FROM Patient_Visit_Services pvs WITH(NOLOCK)
+            JOIN Patient_Visit_Basic_Details pvbd WITH(NOLOCK) ON pvs.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No
+            JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
+            JOIN Service_USSDB sussdb WITH(NOLOCK) ON sussdb.Service_USSDB_Serial_No = pvs.Service_USSDB_Serial_No
+            JOIN Service s WITH(NOLOCK) ON s.Service_Serial_No = sussdb.Service_Serial_No
+            WHERE pvbd.Permanent_Visit_No = '{active_visit}'
+              AND pbd.Permanent_MRN_No = '{active_mrn}'
+              AND pvs.Active_Status = 'A'
+              AND pvs.Patient_Visit_Service_Cancellation_Flag = 'N'
+              AND pvs.Is_Service_Billed = 'N'
+            ORDER BY pvs.Patient_Visit_Services_Serial_No DESC
+            """
+            raw_srv = autonomous_agent.execute_select_sql(srv_sql)
+            srv_list = json.loads(raw_srv) if raw_srv and raw_srv.startswith("[") else []
+            if srv_list:
+                rows = ""
+                for item in srv_list:
+                    cpt = item.get("CPT_Code") or "-"
+                    int_code = item.get("Service_Internal_Code") or "-"
+                    desc = item.get("Service_Description") or "Unknown Service"
+                    rows += f"| {cpt} | {int_code} | {desc} |\n"
+                
+                if current_mode == "developer":
+                    reply = (
+                        f"### 📋 Active Unbilled Services for Patient MRN: `{active_mrn}`, Visit: `{active_visit}`\n\n"
+                        f"• **Patient MRN:** `{active_mrn}` (Exact Match Verified)\n"
+                        f"• **Visit No:** `{active_visit}` (Visit Serial: `{sess['active_entities'].get('visit_serial', 'N/A')}`)\n"
+                        f"• **Billing Status:** Unbilled (`Is_Service_Billed = 'N'`)\n\n"
+                        f"**Active Unbilled Services List ({len(srv_list)} records):**\n\n"
+                        f"| CPT Code | Internal Code | Service Description |\n"
+                        f"| :--- | :--- | :--- |\n"
+                        f"{rows}\n"
+                        f"> ℹ️ **Action:** Intha services innum finalize aagala. Patient Billing screen-la bill finalize pannikalam.\n\n"
+                        f"*(⚡ Live MSSQL records verified with exact patient and visit match)*"
+                    )
+                else:
+                    reply = (
+                        f"Vanakkam! Intha visit-la (MRN: **{active_mrn}**, Visit No: **{active_visit}**) innum bill pannama iruka active services-oda details itho:\n\n"
+                        f"✅ **Active Services List:**\n"
+                        f"Ippo intha visit-la **{len(srv_list)}** services active-ah iruku:\n\n"
+                        f"| CPT Code | Internal Code | Service Description |\n"
+                        f"| :--- | :--- | :--- |\n"
+                        f"{rows}\n"
+                        f"Intha service-ku innum billing finalize aagala, so neenga billing screen-la ithai process pannikalam. Vera ethavathu help venuma?"
+                    )
+                update_session_memory(payload.session_id, payload.message, reply)
+                valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
+                return ChatResponse(
+                    status="success",
+                    reply=reply,
+                    model_used="HIMES Billing Engine (Verified)",
+                    mode=current_mode,
+                    action_executed={
+                        "mrn": active_mrn,
+                        "visit_no": active_visit,
+                        "unbilled_services_count": len(srv_list)
+                    }
+                )
 
         # 1. Valkey Fast-Path: Menu Navigation Lookup
         msg_lower = payload.message.lower()
