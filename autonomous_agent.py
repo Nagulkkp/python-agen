@@ -2,6 +2,7 @@ import sys
 import os
 import re
 import json
+import time
 import traceback
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -302,13 +303,16 @@ class AutonomousAgent:
             )
             models_to_try = [
                 "gemini-3.1-flash-lite",
+                "gemini-3.1-flash-lite-preview",
+                "gemini-3.5-flash-lite",
                 "gemini-3.7-flash",
                 "gemini-flash-lite-latest",
-                "gemini-3-flash-preview",
-                "gemma-4-31b-it",
-                "gemini-3.8-flash",
-                "gemini-3.5-flash"
+                "gemini-3-flash-preview"
             ]
+            custom_model = os.getenv("GEMINI_MODEL")
+            if custom_model:
+                models_to_try.insert(0, custom_model)
+
             last_ex = None
             for m in models_to_try:
                 try:
@@ -321,6 +325,9 @@ class AutonomousAgent:
                             return parts_text
                 except Exception as e:
                     last_ex = e
+                    err_str = str(e)
+                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                        time.sleep(1.5)
                     continue
 
         raise ValueError(f"No working AI LLM connection available: {last_ex}. Please check API keys in .env.")

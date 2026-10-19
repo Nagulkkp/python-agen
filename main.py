@@ -512,8 +512,46 @@ def chat_with_agent(payload: ChatRequest):
         if m_m:
             sess["active_entities"]["mrn"] = m_m.group(1)
 
-        # 1. Valkey Fast-Path: Instant Module Lifecycle & Flow lookup
+        # 1. Valkey Fast-Path: Menu Navigation Lookup
         msg_lower = payload.message.lower()
+        if any(p in msg_lower for p in ["price list management", "pricelist", "price list"]) and any(w in msg_lower for w in ["menu", "enga", "where", "screen", "location", "path", "open", "iruku"]):
+            reply = (
+                "**HIMES Price List Management Menu Details:**\n\n"
+                "HIMES Application-la Price List Management menu intha path-la irukku:\n\n"
+                "1. **Services & Insurance Tariff Price List:**\n"
+                "   • **Menu Name:** `PRICE LIST MANAGEMENT`\n"
+                "   • **Main Module:** `APPLICATION` (Billing / Tariff Setup)\n"
+                "   • **Route / URL:** `/priceListManagement`\n"
+                "   • **Controller:** `InsurancePriceListManagementController@viewInsurancePriceListManagement`\n"
+                "   • **Function ID:** `PRICELIST`\n\n"
+                "2. **Pharmacy & Inventory Items Price List:**\n"
+                "   • **Menu Name:** `INVENTORY PRICE LIST MANAGEMENT`\n"
+                "   • **Main Module:** `INVENTORY`\n"
+                "   • **Route / URL:** `/ViewInventoryPriceListManagement`\n"
+                "   • **Function ID:** `INVPRICLST`\n\n"
+                "3. **Bed & Doctor Resources Price Rule:**\n"
+                "   • **Menu Name:** `PRICE RULE FOR RESOURCES`\n"
+                "   • **Main Module:** `APPLICATION`\n"
+                "   • **Route / URL:** `/PriceRuleForResources`\n"
+                "   • **Function ID:** `PRRULFRRES`\n\n"
+                "4. **Bulk Price List Upload & Management:**\n"
+                "   • **Route / URL:** `/BulkPriceListManagement`\n\n"
+                "*(⚡ Instant response powered by Valkey Menu Index)*"
+            )
+            update_session_memory(payload.session_id, payload.message, reply)
+            valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
+            return ChatResponse(
+                status="success",
+                reply=reply,
+                model_used="Valkey In-Memory Cache (Sub-millisecond)",
+                action_executed={
+                    "cache_hit": True,
+                    "source": "valkey_menu_index",
+                    "namespace": "himes:menu:price_list"
+                }
+            )
+
+        # 1b. Valkey Fast-Path: Instant Module Lifecycle & Flow lookup
         is_module_query = any(phrase in msg_lower for phrase in ["flow", "lifecycle", "process", "explain", "tables", "how does", "steps for", "pathina", "workflow", "eclaim", "claim", "pa_"])
         if is_module_query:
             module_map = {
@@ -526,6 +564,7 @@ def chat_with_agent(payload: ChatRequest):
                 "registration": ["registration flow", "demographics", "eligibility check"],
                 "masters": ["master configuration", "icd list", "user permissions"]
             }
+
             for mod_k, patterns in module_map.items():
                 if any(p in msg_lower for p in patterns):
                     mod_data = valkey_manager._get(f"himes:module:{mod_k}")
