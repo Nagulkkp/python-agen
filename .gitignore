@@ -18,3 +18,7 @@ __pycache__/
 
 # Session cache
 session_memory.json
+
+# Local Redis Server & Dump files
+redis_server/
+dump.rdb
