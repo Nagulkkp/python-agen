@@ -601,7 +601,7 @@
     return getHimesBasePath() + "/agent/chat";
   })();
 
-  const DIRECT_AI_ENDPOINT = "http://127.0.0.1:8000/api/chat";
+  const DIRECT_AI_ENDPOINT = "http://127.0.0.1:8050/api/chat";
 
   // State Management
   let isDeveloperMode = false; // Default User Mode
@@ -915,7 +915,7 @@
     try {
       let response;
       try {
-        // 1. Try local Python agent directly (http://127.0.0.1:8000/api/chat)
+        // 1. Try local Python agent directly (http://127.0.0.1:8050/api/chat)
         response = await fetch(targetUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -964,7 +964,7 @@
     } catch (err) {
       typing.style.display = "none";
       appendHimesMessage(
-        "⚠️ Connection Error: Could not reach AI Agent service at " + targetUrl + ". Please ensure your Laravel server or Python agent (`uvicorn main:app --port 8000`) is running.",
+        "⚠️ Connection Error: Could not reach AI Agent service at " + targetUrl + ". Please ensure your Laravel server or Python agent (`uvicorn main:app --port 8050`) is running.",
         "agent"
       );
     }

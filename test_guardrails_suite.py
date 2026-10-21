@@ -57,7 +57,7 @@ print("TEST 3 & 4: /api/chat ENDPOINT WITH SYSTEM PROMPT")
 print("=" * 60)
 
 try:
-    res = requests.post("http://127.0.0.1:8000/api/chat", json={
+    res = requests.post("http://127.0.0.1:8050/api/chat", json={
         "message": "emr workstation page la yesterday date la patient count enna",
         "session_id": "test_nagul_session"
     }, timeout=30)

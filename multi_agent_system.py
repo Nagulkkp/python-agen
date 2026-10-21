@@ -3,7 +3,7 @@
 HIMES MULTI-AGENT SPECIALIST SYSTEM (PRODUCTION ORCHESTRATION)
 =============================================================================
 Architecture inspired by clinical AI microservices, seamlessly adapted for Nagul's
-HIMES application (/L9/nagul/himes-ai) with local execution (127.0.0.1:8000),
+HIMES application (/L9/nagul/himes-ai) with local execution (127.0.0.1:8050),
 Dual Response System (User View vs. Developer View), strict read-only SQL safety,
 and accelerated Valkey / ChromaDB knowledge integration.
 

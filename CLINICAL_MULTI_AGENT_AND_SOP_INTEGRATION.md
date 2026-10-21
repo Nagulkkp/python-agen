@@ -2,7 +2,7 @@
 
 ## 1. Executive Summary
 
-This document details the architectural expansion of **Nagul's HIMES AI Agent** (`c:\Nagul\python-agent`). Key clinical intelligence assets and multi-agent capabilities were reviewed, extracted from the hospital's clinical service (`/L9/ajitha/ai-service` on `192.168.20.152`), and engineered into Nagul's local agent codebase (`127.0.0.1:8000`) while strictly preserving Nagul's safety guardrails, developer mode diagnostics, and local-only connection mandate.
+This document details the architectural expansion of **Nagul's HIMES AI Agent** (`c:\Nagul\python-agent`). Key clinical intelligence assets and multi-agent capabilities were reviewed, extracted from the hospital's clinical service (`/L9/ajitha/ai-service` on `192.168.20.152`), and engineered into Nagul's local agent codebase (`127.0.0.1:8050`) while strictly preserving Nagul's safety guardrails, developer mode diagnostics, and local-only connection mandate.
 
 ---
 
@@ -99,7 +99,7 @@ The single ReAct loop was upgraded into a modular **Multi-Agent Specialist Syste
 - Supports Dual Response formatting:
   - **User View (Default)**: Clean Markdown status cards (✅, ⚠️, ℹ️), hiding technical file paths, raw SQL queries, and code internals.
   - **Developer View**: Full diagnostic details, raw SELECT queries, Valkey cache keys, and stack traces.
-- Preserves local-only connection mandate (`http://127.0.0.1:8000/api/chat`).
+- Preserves local-only connection mandate (`http://127.0.0.1:8050/api/chat`).
 
 ---
 
