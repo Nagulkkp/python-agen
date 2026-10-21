@@ -32,6 +32,7 @@ from guardrails import (
 from ssh_sandbox import sandboxed_ssh
 from git_automation import SafeGitWorkflow
 from autonomous_agent import autonomous_agent
+from multi_agent_system import himes_orchestrator
 from semantic_cache import check_semantic_cache, save_to_semantic_cache, enforce_safety_rules
 from memory_manager import search_knowledge_base
 from valkey_himes_manager import (
@@ -398,8 +399,8 @@ def run_agent_task(payload: AgentRequest):
                 }
             )
 
-        # 2. Cache Miss -> Run autonomous agent dynamic execution
-        agent_res = autonomous_agent.run(payload.task, payload.context)
+        # 2. Cache Miss -> Run Multi-Agent Orchestrator dynamic execution
+        agent_res = himes_orchestrator.dispatch(payload.task, payload.context)
         reply = agent_res.get("reply", "Task completed.")
 
         # 3. Save into ChromaDB cache for future instant queries
@@ -410,6 +411,7 @@ def run_agent_task(payload: AgentRequest):
             message=reply,
             result={
                 "task": payload.task,
+                "agent_used": agent_res.get("agent", "HimesOrchestrator"),
                 "actions_taken": agent_res.get("actions_taken", []),
                 "steps": agent_res.get("steps", 1),
                 "ai_response": reply
@@ -1088,10 +1090,11 @@ def chat_with_agent(payload: ChatRequest):
         # Sync active session state into Valkey
         valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
 
-        # 3. Run Autonomous Agent with live database and codebase tools
-        agent_res = autonomous_agent.run(effective_message, full_context)
+        # 3. Dispatch to HIMES Multi-Agent Specialist Orchestrator
+        agent_res = himes_orchestrator.dispatch(effective_message, full_context, is_dev_mode=is_developer_mode)
         reply_text = agent_res.get("reply", "No response generated.")
         actions_taken = agent_res.get("actions_taken", [])
+        specialist_name = agent_res.get("agent", "Autonomous Agent (Live MSSQL Engine)")
 
         # Format reply based on mode
         if current_mode == "user":
@@ -1104,7 +1107,7 @@ def chat_with_agent(payload: ChatRequest):
                 for q in queries_run[:3]:
                     sql_text = q.get("input", {}).get("sql_query", "")
                     tech_details += f"```sql\n{sql_text}\n```\n"
-                cache_info = f"• **Session Mode Key:** `chat_session:{payload.session_id}:mode` (developer)\n• **Valkey Session:** Active\n"
+                cache_info = f"• **Session Mode Key:** `chat_session:{payload.session_id}:mode` (developer)\n• **Valkey Session:** Active\n• **Specialist Agent:** `{specialist_name}`\n"
                 tech_details += f"**Cache & State Store:**\n{cache_info}"
                 reply_text += tech_details
 
@@ -1119,10 +1122,12 @@ def chat_with_agent(payload: ChatRequest):
         return ChatResponse(
             status=agent_res.get("status", "success"),
             reply=reply_text,
-            model_used="Autonomous Agent (Live MSSQL Engine)",
+            model_used=f"{specialist_name} (HIMES Multi-Agent)",
             mode=current_mode,
             action_executed={
                 "cache_hit": False,
+                "specialist_agent": specialist_name,
+                "orchestrator_intent": agent_res.get("orchestrator_intent", "dynamic"),
                 "actions_taken": actions_taken,
                 "steps": agent_res.get("steps", 1)
             }

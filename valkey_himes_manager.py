@@ -244,6 +244,112 @@ class ValkeyHimesManager:
         key = f"himes:flow:{clean_name}"
         return self._delete(key)
 
+    # ----------------------------------------------------------------------
+    # 2B. GENERAL & CLINICAL SOP CACHING
+    # ----------------------------------------------------------------------
+    def set_cached_data(self, key: str, value: Any, ttl_seconds: int = 86400) -> bool:
+        """Sets any structured JSON or string data in Valkey with TTL."""
+        return self._set(key, value, ttl=ttl_seconds)
+
+    def get_cached_data(self, key: str) -> Optional[Any]:
+        """Gets cached data from Valkey by key."""
+        return self._get(key)
+
+    def get_clinical_sop(self, slug_or_query: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves a clinical SOP protocol from Valkey by slug or keyword in sub-milliseconds.
+        Key Format: `himes:clinical:sop:{slug}`
+        """
+        clean = slug_or_query.strip().lower().replace(" ", "_").replace("-", "_")
+        # Direct key lookup
+        data = self._get(f"himes:clinical:sop:{clean}")
+        if data:
+            return data
+        
+        # Keyword alias matching
+        aliases = {
+            "triage": "emergency_triage_protocol",
+            "esi": "emergency_triage_protocol",
+            "emergency": "emergency_triage_protocol",
+            "icu": "icu_admission_discharge_criteria",
+            "intensive_care": "icu_admission_discharge_criteria",
+            "code_blue": "code_blue_cardiac_arrest_sop",
+            "cardiac_arrest": "code_blue_cardiac_arrest_sop",
+            "resuscitation": "code_blue_cardiac_arrest_sop",
+            "antibiotic": "antibiotic_stewardship_policy",
+            "stewardship": "antibiotic_stewardship_policy",
+            "restricted_antibiotic": "antibiotic_stewardship_policy",
+            "panic_values": "lis_result_verification_critical_values_and_dispatch_sop",
+            "critical_values": "lis_result_verification_critical_values_and_dispatch_sop",
+            "panic": "lis_result_verification_critical_values_and_dispatch_sop",
+            "vacutainer": "lis_specimen_collection_and_preanalytics_sop",
+            "tube_colors": "lis_specimen_collection_and_preanalytics_sop",
+            "blood_collection": "lis_specimen_collection_and_preanalytics_sop",
+            "microbiology": "lis_microbiology_culture_and_ast_guidelines",
+            "culture_ast": "lis_microbiology_culture_and_ast_guidelines",
+            "ast": "lis_microbiology_culture_and_ast_guidelines",
+            "qc": "lis_analytical_testing_and_qc_protocols",
+            "westgard": "lis_analytical_testing_and_qc_protocols",
+            "tat": "lis_result_verification_critical_values_and_dispatch_sop",
+            "turnaround": "lis_result_verification_critical_values_and_dispatch_sop",
+            "insurance_billing": "hospital_billing_insurance_policy",
+            "preauth": "hospital_billing_insurance_policy",
+            "tpa": "hospital_billing_insurance_policy",
+        }
+        for k, target_slug in aliases.items():
+            if k in clean:
+                data = self._get(f"himes:clinical:sop:{target_slug}")
+                if data:
+                    return data
+        return None
+
+    def get_panic_values_master(self) -> Dict[str, Any]:
+        """Retrieves authoritative master table of critical/panic values from Valkey."""
+        res = self._get("himes:clinical:panic_values")
+        return res if isinstance(res, dict) else {}
+
+    def evaluate_panic_value(self, analyte_name: str, value: float) -> Optional[Dict[str, Any]]:
+        """
+        Evaluates a patient's numerical test result against the authoritative
+        hospital panic value thresholds. Returns an alert dict if value is critical.
+        """
+        master = self.get_panic_values_master()
+        if not master:
+            return None
+        
+        clean_name = analyte_name.strip().lower().replace(" ", "_")
+        for key, entry in master.items():
+            if key in clean_name or entry.get("analyte", "").lower() in clean_name:
+                low = entry.get("low_critical")
+                high = entry.get("high_critical")
+                unit = entry.get("unit", "")
+                risk = entry.get("clinical_significance", "Life-threatening risk")
+                analyte = entry.get("analyte", analyte_name)
+
+                if low is not None and isinstance(low, (int, float)) and value < low:
+                    return {
+                        "is_panic": True,
+                        "level": "PANIC_LOW",
+                        "analyte": analyte,
+                        "value": value,
+                        "unit": unit,
+                        "threshold": f"< {low}",
+                        "clinical_significance": risk,
+                        "alert_banner": f"🚨 **CRITICAL / PANIC LOW ALERT:** {analyte} is **{value} {unit}** (Critical Threshold: < {low} {unit}). Immediate physician escalation required within 15 minutes! Risk: {risk}."
+                    }
+                if high is not None and isinstance(high, (int, float)) and value > high:
+                    return {
+                        "is_panic": True,
+                        "level": "PANIC_HIGH",
+                        "analyte": analyte,
+                        "value": value,
+                        "unit": unit,
+                        "threshold": f"> {high}",
+                        "clinical_significance": risk,
+                        "alert_banner": f"🚨 **CRITICAL / PANIC HIGH ALERT:** {analyte} is **{value} {unit}** (Critical Threshold: > {high} {unit}). Immediate physician escalation required within 15 minutes! Risk: {risk}."
+                    }
+        return None
+
     def _seed_default_himes_flows(self):
         """
         Pre-seeds core HIMES application workflows so they are instantly
