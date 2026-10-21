@@ -15,8 +15,8 @@ class AgentChatController extends Controller
 
     public function __construct()
     {
-        // Read from config/services.php or .env, fallback to local python agent on port 8000
-        $defaultUrl = env('PYTHON_AGENT_URL', 'http://127.0.0.1:8000/api/chat');
+        // Read from config/services.php or .env, fallback to local python agent on port 8050
+        $defaultUrl = env('PYTHON_AGENT_URL', 'http://127.0.0.1:8050/api/chat');
         $this->agentUrl = config('services.python_agent.url', $defaultUrl);
     }
 
