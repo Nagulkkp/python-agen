@@ -1091,6 +1091,11 @@ def chat_with_agent(payload: ChatRequest):
         valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
 
         # 3. Dispatch to HIMES Multi-Agent Specialist Orchestrator
+        classified_intent = himes_orchestrator.classify_intent(effective_message, full_context)
+        if classified_intent == "engineering_dev":
+            current_mode = "developer"
+            is_developer_mode = True
+
         agent_res = himes_orchestrator.dispatch(effective_message, full_context, is_dev_mode=is_developer_mode)
         reply_text = agent_res.get("reply", "No response generated.")
         actions_taken = agent_res.get("actions_taken", [])

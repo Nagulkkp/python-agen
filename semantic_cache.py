@@ -113,9 +113,16 @@ def enforce_safety_rules(query: str):
         raise SecurityException("Directory Lock Violation: Directory traversal ('..') outside Nagul's directory is strictly forbidden!")
 
     # Block unauthorized system root paths
-    for forbidden_path in ["/etc", "/var", "/root", "/home", "C:\\Windows", "C:\\Program Files"]:
-        if forbidden_path.lower() in clean_q.lower():
+    # Note: When developers paste live stack traces or production log lines containing web app paths
+    # like '/var/www/html/...', we allow it for log diagnostics, while still blocking raw system access to /var, /etc, etc.
+    clean_q_without_webapp = re.sub(r"/var/www/(?:html/)?[a-zA-Z0-9_\-\./]+", "", clean_q, flags=re.IGNORECASE)
+    for forbidden_path in ["/etc", "/root", "/home", "C:\\Windows", "C:\\Program Files"]:
+        if forbidden_path.lower() in clean_q_without_webapp.lower():
             raise SecurityException(f"Directory Lock Violation: Access to '{forbidden_path}' is outside Nagul's authorized directory!")
+
+    # Check for /var only if not part of a web application file path
+    if "/var" in clean_q_without_webapp.lower():
+        raise SecurityException("Directory Lock Violation: Access to '/var' is outside Nagul's authorized directory!")
 
 
 # ----------------------------------------------------------------------
