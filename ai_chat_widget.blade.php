@@ -583,8 +583,24 @@
 </div>
 
 <script>
+  // Helper to dynamically resolve application base path (e.g. /himes-ai or /himes2)
+  function getHimesBasePath() {
+    const segments = window.location.pathname.split('/').filter(Boolean);
+    if (segments.length > 0 && (segments[0].toLowerCase().startsWith('himes') || segments[0].toLowerCase().startsWith('kool'))) {
+      return '/' + segments[0];
+    }
+    return '';
+  }
+
   // Endpoints: primary Laravel route, fallback direct FastAPI
-  const LARAVEL_AI_ENDPOINT = "/agent/chat";
+  const LARAVEL_AI_ENDPOINT = (function() {
+    const bladeUrl = "{{ url('agent/chat') }}";
+    if (bladeUrl && !bladeUrl.includes('{{')) {
+      return bladeUrl;
+    }
+    return getHimesBasePath() + "/agent/chat";
+  })();
+
   const DIRECT_AI_ENDPOINT = "http://127.0.0.1:8000/api/chat";
 
   // State Management
@@ -894,30 +910,26 @@
       }
     });
 
-    let targetUrl = LARAVEL_AI_ENDPOINT;
+    let targetUrl = DIRECT_AI_ENDPOINT;
 
     try {
       let response;
       try {
-        response = await fetch(targetUrl, {
-          method: "POST",
-          headers: headers,
-          body: payload
-        });
-
-        if (response.status === 404) {
-          targetUrl = DIRECT_AI_ENDPOINT;
-          response = await fetch(targetUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: payload
-          });
-        }
-      } catch (netErr) {
-        targetUrl = DIRECT_AI_ENDPOINT;
+        // 1. Try local Python agent directly (http://127.0.0.1:8000/api/chat)
         response = await fetch(targetUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          body: payload
+        });
+        if (!response.ok && response.status !== 200) {
+          throw new Error("Direct local returned HTTP " + response.status);
+        }
+      } catch (directErr) {
+        // 2. Fallback to Laravel endpoint
+        targetUrl = LARAVEL_AI_ENDPOINT;
+        response = await fetch(targetUrl, {
+          method: "POST",
+          headers: headers,
           body: payload
         });
       }
@@ -933,6 +945,8 @@
       let reply = "";
       if (data.reply) {
         reply = data.reply;
+      } else if (data.response) {
+        reply = data.response;
       } else if (data.result && data.result.ai_response) {
         reply = data.result.ai_response;
       } else if (data.message) {

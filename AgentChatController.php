@@ -15,8 +15,9 @@ class AgentChatController extends Controller
 
     public function __construct()
     {
-        // Read from config/services.php or .env, fallback to default local port 8000
-        $this->agentUrl = config('services.python_agent.url', env('PYTHON_AGENT_URL', 'http://127.0.0.1:8000/api/chat'));
+        // Read from config/services.php or .env, fallback to local python agent on port 8000
+        $defaultUrl = env('PYTHON_AGENT_URL', 'http://127.0.0.1:8000/api/chat');
+        $this->agentUrl = config('services.python_agent.url', $defaultUrl);
     }
 
     /**
@@ -71,9 +72,9 @@ class AgentChatController extends Controller
 
                 return response()->json([
                     'status'              => $responseData['status'] ?? 'success',
-                    'reply'               => $responseData['reply'] ?? 'No reply generated.',
+                    'reply'               => $responseData['reply'] ?? $responseData['response'] ?? 'No reply generated.',
                     'mode'                => $responseData['mode'] ?? 'user',
-                    'model_used'          => $responseData['model_used'] ?? 'Python Agent',
+                    'model_used'          => $responseData['model_used'] ?? $responseData['agent_used'] ?? 'Python Agent',
                     'action_executed'     => $responseData['action_executed'] ?? [],
                     'guardrails_enforced' => $responseData['guardrails_enforced'] ?? [],
                 ], 200);

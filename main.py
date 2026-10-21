@@ -3,6 +3,7 @@ import os
 import re
 import json
 import datetime
+import traceback
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -91,6 +92,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def add_private_network_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
+
 class AgentRequest(BaseModel):
     task: str
     context: dict = {}
@@ -170,13 +177,13 @@ def generate_model_response(prompt: str, system_prompt: str = SAFETY_SYSTEM_PROM
     if gemini_key and not gemini_key.startswith("your_"):
         from langchain_google_genai import ChatGoogleGenerativeAI
         models_to_try = [
+            "gemini-3.8-flash",
+            "gemini-3.5-flash",
             "gemini-3.1-flash-lite",
             "gemini-3.7-flash",
             "gemini-flash-lite-latest",
             "gemini-3-flash-preview",
-            "gemma-4-31b-it",
-            "gemini-3.8-flash",
-            "gemini-3.5-flash"
+            "gemma-4-31b-it"
         ]
         last_err = None
         for m in models_to_try:
@@ -1146,4 +1153,6 @@ def chat_with_agent(payload: ChatRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    host = os.getenv("AGENT_HOST", "127.0.0.1")
+    port = int(os.getenv("AGENT_PORT", 8000))
+    uvicorn.run("main:app", host=host, port=port, reload=True)

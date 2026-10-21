@@ -46,22 +46,30 @@ def deploy_to_laravel():
         working_dir=REMOTE_BASE
     )
 
-    if "agent/chat" in grep_res:
-        print(f"   Route already exists in web.php:\n   {grep_res.strip()}")
-    else:
-        print("   Adding route to routes/web.php...")
-        route_snippet = (
-            "\n\n// AI Assistant Chatbox Endpoint\n"
-            "Route::post('/agent/chat', [\\App\\Http\\Controllers\\AgentChatController::class, 'sendMessage'])->name('agent.chat');\n"
+    with sftp.open(remote_web_routes, "r") as rf:
+        current_content = rf.read().decode("utf-8")
+
+    route_definition = (
+        "// AI Assistant Chatbox Endpoint\n"
+        "Route::post('/agent/chat', [\\App\\Http\\Controllers\\AgentChatController::class, 'sendMessage'])\n"
+        "    ->withoutMiddleware([\\App\\Http\\Middleware\\VerifyCsrfToken::class])\n"
+        "    ->name('agent.chat');"
+    )
+
+    if "agent/chat" in current_content:
+        import re
+        current_content = re.sub(
+            r"// AI Assistant Chatbox Endpoint\s*Route::post\('/agent/chat'.*?->name\('agent\.chat'\);",
+            lambda m: route_definition,
+            current_content,
+            flags=re.DOTALL
         )
-        # Read existing web.php, append snippet, write back
-        with sftp.open(remote_web_routes, "r") as rf:
-            current_content = rf.read().decode("utf-8")
-        
-        new_content = current_content.rstrip() + route_snippet
-        with sftp.open(remote_web_routes, "w") as wf:
-            wf.write(new_content)
-        print("   Route appended to routes/web.php successfully.")
+    else:
+        current_content = current_content.rstrip() + "\n\n" + route_definition + "\n"
+
+    with sftp.open(remote_web_routes, "w") as wf:
+        wf.write(current_content)
+    print("   Route updated in routes/web.php with CSRF exemption.")
 
     # 5. Check PHP syntax of routes/web.php
     routes_lint = sandboxed_ssh.execute_sandboxed_command(
