@@ -218,14 +218,102 @@ def extract_entity_numbers(query: str) -> set:
 
 
 # ----------------------------------------------------------------------
+# 4b. HEALTHCARE PATIENT DATA PRIVACY (PHI) & LIVE DB GUARDRAILS
+# ----------------------------------------------------------------------
+PATIENT_ENTITY_PATTERNS = [
+    re.compile(r'\b(?:mrn|visit|patient|visit_no|permanent_mrn|permanent_visit|emirates_id|eid|iqama)\b', re.IGNORECASE),
+    re.compile(r'\b(?:mrn|visit|patient|visit_no)\s*[:#\-\s]*\d+', re.IGNORECASE),
+    re.compile(r'\b(?:patient name|patient details|visit details|unbilled services|bill status|lab orders|prescriptions)\b', re.IGNORECASE)
+]
+
+def is_patient_or_phi_data(query: str, answer: str = "") -> bool:
+    """
+    Healthcare Data Protection & Real-time Freshness Guardrail:
+    Detects whether a query or answer refers to specific patient entities or clinical PHI:
+    - Queries containing MRN, Visit numbers, Patient Names, Emirates ID, Mobile numbers.
+    - Clinical encounter data: Vitals, Prescriptions, Lab item results, Visit-specific billing/unbilled services.
+    
+    Guarantees:
+    1. ZERO Patient Health Information (PHI) stored in persistent vector/semantic cache.
+    2. Real-time accuracy: Any query referencing a patient/visit is ALWAYS dispatched
+       to the live MSSQL Database, never returning stale cached results.
+    """
+    combined_text = f"{query} {answer}".lower()
+    
+    # 1. Check for explicit 4+ digit IDs combined with patient/visit/encounter keywords
+    has_digit_entity = bool(re.search(r'\b\d{4,}\b', query))
+    if has_digit_entity:
+        if any(w in combined_text for w in ["mrn", "visit", "patient", "encounter", "bill", "receipt", "deposit", "cpt", "service"]):
+            return True
+
+    # 2. Check for explicit patient identity keywords in query
+    for pat in PATIENT_ENTITY_PATTERNS:
+        if pat.search(query):
+            return True
+
+    # 3. Check for clinical encounter keywords in query (vitals, rx, lab orders for a patient)
+    clinical_keywords = [
+        "vitals", "blood pressure", "spo2", "heart rate", "troponin", "potassium",
+        "prescription", "prescribed", "unbilled", "patient share", "cashier",
+        "emirates id", "phone number", "contact mobile", "patient registered"
+    ]
+    if any(k in query.lower() for k in clinical_keywords) and has_digit_entity:
+        return True
+
+    # 4. Check for patient identifiers in the generated answer
+    if answer:
+        ans_lower = answer.lower()
+        if any(marker in ans_lower for marker in [
+            "permanent_mrn_no", "permanent_visit_no", "patient_basic_details",
+            "patient mrn:", "visit no:", "patient name:", "active unbilled services for patient mrn",
+            "patient_visit_basic_details_serial_no", "active services list:"
+        ]):
+            return True
+        if re.search(r'mrn:?\s*`?\d{4,}`?', ans_lower) or re.search(r'visit:?\s*`?\d{4,}`?', ans_lower):
+            return True
+
+    return False
+
+
+def purge_patient_phi_from_cache() -> int:
+    """
+    Scans the ChromaDB cache_collection and purges all existing patient/visit records,
+    leaving only static system, menu, and general knowledge.
+    """
+    try:
+        if cache_collection.count() == 0:
+            return 0
+        all_items = cache_collection.get()
+        ids_to_delete = []
+        for doc_id, doc_text, meta in zip(all_items["ids"], all_items["documents"], all_items["metadatas"]):
+            ans_text = meta.get("answer", "") if meta else ""
+            if is_patient_or_phi_data(doc_text, ans_text):
+                ids_to_delete.append(doc_id)
+        
+        if ids_to_delete:
+            cache_collection.delete(ids=ids_to_delete)
+            print(f"[CACHE PURGE] Successfully purged {len(ids_to_delete)} patient PHI records from ChromaDB cache_collection.")
+        return len(ids_to_delete)
+    except Exception as e:
+        print(f"[CACHE PURGE ERROR] {e}")
+        return 0
+
+
+# ----------------------------------------------------------------------
 # 5. MODULAR SEMANTIC CACHING FUNCTIONS
 # ----------------------------------------------------------------------
 def check_semantic_cache(user_query: str, threshold: float = 0.25) -> Optional[Dict[str, Any]]:
     """
     Checks if a semantically similar query exists in ChromaDB cache_collection.
     Returns matched details dict if distance < threshold and exact entity numbers and intent aspects match.
+    STRICT GUARDRAIL: Automatically bypasses cache for ANY patient or clinical PHI queries!
     """
     if not user_query or not user_query.strip():
+        return None
+
+    # Healthcare Privacy & Real-time DB Guardrail: Bypass cache for patient data
+    if is_patient_or_phi_data(user_query):
+        print(f"[CACHE BYPASS - PATIENT/PHI GUARDRAIL] Query '{user_query}' contains patient/visit entity. Always querying live MSSQL DB.")
         return None
 
     try:
@@ -248,7 +336,6 @@ def check_semantic_cache(user_query: str, threshold: float = 0.25) -> Optional[D
 
             if best_distance < threshold:
                 # 1. Exact Entity Number Guardrail:
-                # Queries with specific IDs (e.g. MRN 3004389 vs 3004383, Visit 16923 vs 16924) MUST have identical entity numbers
                 user_nums = extract_entity_numbers(user_query)
                 matched_nums = extract_entity_numbers(matched_query)
                 if user_nums != matched_nums:
@@ -258,13 +345,26 @@ def check_semantic_cache(user_query: str, threshold: float = 0.25) -> Optional[D
                 # 2. Intent Aspect Guardrail:
                 user_aspects = extract_intent_aspects(user_query)
                 matched_aspects = extract_intent_aspects(matched_query)
-                # If user asks for specific facets like deposit/receipt/service/inventory/bed/price not covered in matched query, reject cache hit
                 missing_aspects = user_aspects - matched_aspects
                 if missing_aspects and ("deposit" in missing_aspects or "receipt" in missing_aspects or "service" in missing_aspects or "inventory" in missing_aspects or "bed" in missing_aspects or "price" in missing_aspects):
                     print(f"[CACHE MISS (Aspect Mismatch)] User asked for {missing_aspects} not present in cached query '{matched_query}'")
                     return None
 
+                # 3. Language Isolation Guardrail:
+                from utils.table_formatter import detect_language
+                query_lang = detect_language(user_query)
+                cached_lang = cached_meta.get("lang") or detect_language(matched_query)
+                if query_lang != cached_lang:
+                    print(f"[CACHE MISS (Language Mismatch)] Query lang '{query_lang}' != Cached lang '{cached_lang}'")
+                    return None
+
                 cached_answer = cached_meta.get("answer", "")
+                
+                # Double-check cached answer does not contain PHI
+                if is_patient_or_phi_data(matched_query, cached_answer):
+                    print(f"[CACHE PURGE ON HIT] Cached item contains PHI. Invalidating cache hit.")
+                    return None
+
                 print(f"[CACHE HIT] Distance: {best_distance:.4f} (< {threshold}) | Matched: \"{matched_query}\"")
                 return {
                     "answer": cached_answer,
@@ -282,9 +382,14 @@ def check_semantic_cache(user_query: str, threshold: float = 0.25) -> Optional[D
 def save_to_semantic_cache(user_query: str, answer: str) -> Optional[str]:
     """
     Saves user_query and its answer into ChromaDB cache_collection.
-    Skips caching error responses or prompts asking the user for missing details.
+    Skips caching error responses, missing details prompts, and STRICTLY PROHIBITS Patient PHI.
     """
     if not user_query or not answer:
+        return None
+
+    # Healthcare Privacy & Real-Time Data Guardrail: Block patient/visit records
+    if is_patient_or_phi_data(user_query, answer):
+        print(f"[CACHE BLOCKED - PATIENT/PHI GUARDRAIL] Skipped caching patient/visit records to protect PHI and guarantee real-time data freshness.")
         return None
 
     lower_ans = answer.lower()
@@ -302,6 +407,9 @@ def save_to_semantic_cache(user_query: str, answer: str) -> Optional[str]:
         embeddings = get_embeddings_model()
         query_vector = embeddings.embed_query(user_query)
 
+        from utils.table_formatter import detect_language
+        query_lang = detect_language(user_query)
+
         cache_id = str(uuid.uuid4())
         cache_collection.add(
             ids=[cache_id],
@@ -309,6 +417,7 @@ def save_to_semantic_cache(user_query: str, answer: str) -> Optional[str]:
             embeddings=[query_vector],
             metadatas=[{
                 "answer": answer,
+                "lang": query_lang,
                 "cached_at": datetime.datetime.now().isoformat(),
                 "query": user_query
             }]

@@ -20,6 +20,7 @@ Features:
 
 import os
 import sys
+import re
 import json
 import time
 import uuid
@@ -245,7 +246,103 @@ class ValkeyHimesManager:
         return self._delete(key)
 
     # ----------------------------------------------------------------------
-    # 2B. GENERAL & CLINICAL SOP CACHING
+    # 2B. EPHEMERAL PATIENT SNAPSHOT CACHING (5-MINUTE TTL)
+    # ----------------------------------------------------------------------
+    def cache_patient_snapshot(self, mrn_or_visit: str, aspect: str, data: Any, ttl: int = 300) -> bool:
+        """
+        Caches real-time patient query snapshots in Valkey RAM with a short 5-minute (300s) TTL.
+        Prevents redundant live DB hits and guarantees 0 LLM token consumption on repeated inquiries.
+        Key Format: `himes:ephemeral:patient:{identifier}:{aspect}`
+        """
+        clean_id = str(mrn_or_visit).strip().lower()
+        clean_aspect = aspect.strip().lower()
+        key = f"himes:ephemeral:patient:{clean_id}:{clean_aspect}"
+        return self._set(key, data, ttl=ttl)
+
+    def get_patient_snapshot(self, mrn_or_visit: str, aspect: str) -> Optional[Any]:
+        """
+        Retrieves cached patient snapshot if within the 5-minute TTL window.
+        Returns None if expired or not found.
+        """
+        clean_id = str(mrn_or_visit).strip().lower()
+        clean_aspect = aspect.strip().lower()
+        key = f"himes:ephemeral:patient:{clean_id}:{clean_aspect}"
+        return self._get(key)
+
+    def invalidate_patient_snapshot(self, mrn_or_visit: str, aspect: str = "") -> bool:
+        """Invalidates ephemeral patient cache when new transactions occur or during test cleanup."""
+        clean_id = str(mrn_or_visit).strip().lower()
+        prefix = f"himes:ephemeral:patient:{clean_id}:"
+        if aspect:
+            key = f"{prefix}{aspect.strip().lower()}"
+            return self._delete(key)
+        # Invalidate all keys matching this patient prefix
+        keys_to_del = [k for k in list(self._fallback_store.keys()) if k.startswith(prefix)]
+        for k in keys_to_del:
+            self._delete(k)
+        if self.is_connected:
+            try:
+                for k in self._client.scan_iter(f"{prefix}*"):
+                    self._client.delete(k)
+            except Exception:
+                pass
+    # ----------------------------------------------------------------------
+    # 2C. SHA256 EPHEMERAL QUERY CACHING (300-SECOND / 5-MINUTE TTL)
+    # ----------------------------------------------------------------------
+    @staticmethod
+    def generate_query_hash(user_query: str, active_mrn: str = "", session_id: str = "") -> str:
+        """
+        Generates a deterministic SHA256 hash key from user_query, active_mrn, and session_id.
+        """
+        norm_query = re.sub(r'\s+', ' ', (user_query or "").strip().lower())
+        norm_mrn = str(active_mrn or "").strip().lower()
+        norm_session = str(session_id or "").strip().lower()
+        combined = f"{norm_query}|{norm_mrn}|{norm_session}"
+        return hashlib.sha256(combined.encode("utf-8")).hexdigest()
+
+    def cache_ephemeral_query(
+        self,
+        user_query: str,
+        active_mrn: str = "",
+        session_id: str = "",
+        formatted_response: str = "",
+        executed_sql: str = "",
+        ttl: int = 300
+    ) -> str:
+        """
+        Caches formatted response and SQL payload in Valkey with a 300-second (5-minute) TTL
+        using the SHA256 hash key: `himes:ephemeral:query:{sha256}`.
+        """
+        q_hash = self.generate_query_hash(user_query, active_mrn, session_id)
+        cache_key = f"himes:ephemeral:query:{q_hash}"
+        payload = {
+            "formatted_response": formatted_response,
+            "executed_sql": executed_sql,
+            "cached_at": time.time(),
+            "user_query": user_query,
+            "mrn": active_mrn,
+            "session_id": session_id,
+            "ttl": ttl
+        }
+        self._set(cache_key, payload, ttl=ttl)
+        return cache_key
+
+    def get_ephemeral_query(
+        self,
+        user_query: str,
+        active_mrn: str = "",
+        session_id: str = ""
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves cached response and SQL payload if present within 300-second TTL.
+        Returns dict with keys: formatted_response, executed_sql, or None if expired/missing.
+        """
+        q_hash = self.generate_query_hash(user_query, active_mrn, session_id)
+        cache_key = f"himes:ephemeral:query:{q_hash}"
+        return self._get(cache_key)
+
+    # ----------------------------------------------------------------------
+    # 2D. GENERAL & CLINICAL SOP CACHING
     # ----------------------------------------------------------------------
     def set_cached_data(self, key: str, value: Any, ttl_seconds: int = 86400) -> bool:
         """Sets any structured JSON or string data in Valkey with TTL."""

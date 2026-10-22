@@ -33,8 +33,13 @@ from ssh_sandbox import sandboxed_ssh
 from git_automation import SafeGitWorkflow
 from autonomous_agent import autonomous_agent
 from multi_agent_system import himes_orchestrator
-from semantic_cache import check_semantic_cache, save_to_semantic_cache, enforce_safety_rules
 from memory_manager import search_knowledge_base
+from semantic_cache import (
+    check_semantic_cache,
+    save_to_semantic_cache,
+    enforce_safety_rules,
+    is_patient_or_phi_data
+)
 from valkey_himes_manager import (
     valkey_manager,
     get_himes_context,
@@ -42,6 +47,10 @@ from valkey_himes_manager import (
     save_session_state,
     get_session_state
 )
+
+# ── LangChain Integrations (lazy import to avoid circular deps at startup)
+# chains, agents, memory, and skills are imported inside their endpoints
+# so uvicorn startup time is not penalised.
 
 # Load environment variables from .env
 load_dotenv(override=True)
@@ -385,26 +394,28 @@ def run_agent_task(payload: AgentRequest):
         task_query = payload.task or ""
         enforce_safety_rules(task_query)
 
-        # 1. Check ChromaDB Semantic Cache first for instant response
-        cached_result = check_semantic_cache(task_query, threshold=0.25)
-        if cached_result:
-            return AgentResponse(
-                status="success",
-                message=cached_result["answer"],
-                result={
-                    "task": task_query,
-                    "actions_taken": ["ChromaDB Semantic Cache Hit (Instant)"],
-                    "steps": 0,
-                    "ai_response": cached_result["answer"]
-                }
-            )
+        # 1. Check ChromaDB Semantic Cache first for instant response (SKIP if patient/PHI query)
+        if not is_patient_or_phi_data(task_query):
+            cached_result = check_semantic_cache(task_query, threshold=0.25)
+            if cached_result:
+                return AgentResponse(
+                    status="success",
+                    message=cached_result["answer"],
+                    result={
+                        "task": task_query,
+                        "actions_taken": ["ChromaDB Semantic Cache Hit (Instant)"],
+                        "steps": 0,
+                        "ai_response": cached_result["answer"]
+                    }
+                )
 
         # 2. Cache Miss -> Run Multi-Agent Orchestrator dynamic execution
         agent_res = himes_orchestrator.dispatch(payload.task, payload.context)
         reply = agent_res.get("reply", "Task completed.")
 
-        # 3. Save into ChromaDB cache for future instant queries
-        save_to_semantic_cache(task_query, reply)
+        # 3. Save into ChromaDB cache for future instant queries (ONLY non-patient knowledge)
+        if not is_patient_or_phi_data(task_query, reply):
+            save_to_semantic_cache(task_query, reply)
 
         return AgentResponse(
             status=agent_res.get("status", "success"),
@@ -467,7 +478,7 @@ def get_session_context(session_id: str) -> dict:
 
 def extract_entities_from_text(text: str) -> dict:
     entities = {}
-    v_m = re.search(r'\b(?:visit|visit\s*no|visit\s*number)[:\s#]*([0-9]{4,8})\b', text, re.IGNORECASE)
+    v_m = re.search(r'\b(?:visit|visit\s*no|visit\s*number)[:\s#]*([A-Za-z0-9_-]{3,12})\b', text, re.IGNORECASE)
     if v_m:
         entities["visit_no"] = v_m.group(1)
         
@@ -475,7 +486,9 @@ def extract_entities_from_text(text: str) -> dict:
     if not m_m:
         m_m = re.search(r'\b(PHAR[0-9]+)\b', text, re.IGNORECASE)
     if m_m:
-        entities["mrn"] = m_m.group(1)
+        raw_mrn = m_m.group(1)
+        clean_mrn = re.sub(r'(-?ku|-?oda|-?ukku)$', '', raw_mrn, flags=re.IGNORECASE)
+        entities["mrn"] = clean_mrn
         
     b_m = re.search(r'\b(?:bill|bill\s*no|invoice)[:\s#]*([0-9]{4,8})\b', text, re.IGNORECASE)
     if b_m:
@@ -748,42 +761,169 @@ def chat_with_agent(payload: ChatRequest):
         active_visit = sess["active_entities"].get("visit_no")
         msg_lower = payload.message.lower()
 
-        # If user asks about visit, billing, services, or unbilled items without giving a visit number,
-        # inherit the active MRN and auto-resolve the latest visit for that patient if visit_no was unset
-        is_visit_level_query = any(w in msg_lower for w in ["visit", "billing", "bill", "service", "services", "deposit", "receipt", "unbilled", "un-billed", "cpt"])
-        if active_mrn and not active_visit and is_visit_level_query:
+        # Core Concept: If MRN is active but visit_no is unset, and inquiry is not a general screen/module lookup,
+        # auto-resolve the latest encounter visit for that patient dynamically
+        is_system_meta_inquiry = any(w in msg_lower for w in ["module", "screen", "menu", "workflow", "lifecycle", "route"])
+        if active_mrn and not active_visit and not is_system_meta_inquiry:
             # First check if the screen URL provided the visit
             if screen_ents and screen_ents.get("visit_no") and screen_ents.get("mrn") == active_mrn:
                 active_visit = screen_ents["visit_no"]
                 sess["active_entities"]["visit_no"] = active_visit
                 sess["active_entities"]["visit_serial"] = screen_ents.get("visit_serial")
             else:
-                try:
-                    v_sql = f"""
-                    SELECT TOP 1 pvbd.Permanent_Visit_No, pvbd.Patient_Visit_Basic_Details_Serial_No
-                    FROM Patient_Visit_Basic_Details pvbd WITH(NOLOCK)
-                    JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
-                    WHERE pbd.Permanent_MRN_No = '{active_mrn}'
-                    ORDER BY pvbd.Patient_Visit_Basic_Details_Serial_No DESC
-                    """
-                    v_raw = autonomous_agent.execute_select_sql(v_sql)
-                    if v_raw and v_raw.startswith("["):
-                        v_data = json.loads(v_raw)
-                        if v_data and len(v_data) > 0:
-                            active_visit = str(v_data[0].get("Permanent_Visit_No", "")).strip()
-                            sess["active_entities"]["visit_no"] = active_visit
-                            sess["active_entities"]["visit_serial"] = str(v_data[0].get("Patient_Visit_Basic_Details_Serial_No", "")).strip()
-                except Exception as e:
-                    print(f"[EntityResolution] Error fetching latest visit for MRN {active_mrn}: {e}")
+                cached_v = valkey_manager.get_patient_snapshot(active_mrn, "latest_visit")
+                if cached_v:
+                    active_visit = str(cached_v)
+                    sess["active_entities"]["visit_no"] = active_visit
+                else:
+                    try:
+                        v_sql = f"""
+                        SELECT TOP 1 pvbd.Permanent_Visit_No, pvbd.Patient_Visit_Basic_Details_Serial_No
+                        FROM Patient_Visit_Basic_Details pvbd WITH(NOLOCK)
+                        JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
+                        WHERE pbd.Permanent_MRN_No = '{active_mrn}'
+                        ORDER BY pvbd.Patient_Visit_Basic_Details_Serial_No DESC
+                        """
+                        v_raw = autonomous_agent.execute_select_sql(v_sql)
+                        if v_raw and v_raw.startswith("["):
+                            v_data = json.loads(v_raw)
+                            if v_data and len(v_data) > 0:
+                                active_visit = str(v_data[0].get("Permanent_Visit_No", "")).strip()
+                                sess["active_entities"]["visit_no"] = active_visit
+                                sess["active_entities"]["visit_serial"] = str(v_data[0].get("Patient_Visit_Basic_Details_Serial_No", "")).strip()
+                                valkey_manager.cache_patient_snapshot(active_mrn, "latest_visit", active_visit, ttl=300)
+                    except Exception as e:
+                        print(f"[EntityResolution] Error fetching latest visit for MRN {active_mrn}: {e}")
 
-        # Dedicated Handler 0: Unbilled Services Inquiry for Active Patient & Visit
-        is_unbilled_service_query = (
-            any(w in msg_lower for w in ["bill pannama", "unbilled", "un-billed", "bill aagala", "bill pannaatha", "pending service", "pending services"])
-            or (any(w in msg_lower for w in ["service", "services"]) and any(w in msg_lower for w in ["bill pannama", "bill innum pannalana", "not billed", "bill pannala"]))
+        # ====================================================================
+        # TIER 1: ZERO-TOKEN DETERMINISTIC PATIENT ENGINE + VALKEY 5-MIN EPHEMERAL CACHE
+        # ====================================================================
+
+        # 0. Valkey 5-Minute Ephemeral Query Cache (SHA256: hash(query + mrn + session_id))
+        cached_ephemeral = valkey_manager.get_ephemeral_query(payload.message, active_mrn=active_mrn or "", session_id=payload.session_id)
+        if cached_ephemeral and isinstance(cached_ephemeral, dict):
+            cached_resp = cached_ephemeral.get("formatted_response") or ""
+            if cached_resp:
+                update_session_memory(payload.session_id, payload.message, cached_resp)
+                return ChatResponse(
+                    status="success",
+                    reply=cached_resp,
+                    model_used="Valkey Ephemeral Cache (SHA256, 5-min TTL, 0 Tokens)",
+                    mode=current_mode,
+                    action_executed={
+                        "mrn": active_mrn,
+                        "cache_hit": True,
+                        "sha256": valkey_manager.generate_query_hash(payload.message, active_mrn or "", payload.session_id),
+                        "executed_sql": cached_ephemeral.get("executed_sql", "")
+                    }
+                )
+
+        # Dedicated Handler 0A: Patient Demographics Lookup (MRN -> Name, Phone, Gender, Age)
+        is_demographics_query = (
+            active_mrn and any(w in msg_lower for w in ["name", "patient name", "yaaru", "details", "profile", "mobile", "phone", "contact", "age", "gender"])
+            and not any(w in msg_lower for w in ["service", "services", "unbilled", "bill", "billing", "deposit", "receipt", "visit list", "visits"])
         )
-        if is_unbilled_service_query and active_visit and active_mrn:
+        if is_demographics_query:
+            # 1. Check Valkey Ephemeral Cache (5-Minute TTL)
+            cached_demo = valkey_manager.get_patient_snapshot(active_mrn, "demographics")
+            if cached_demo:
+                update_session_memory(payload.session_id, payload.message, cached_demo)
+                return ChatResponse(
+                    status="success",
+                    reply=cached_demo,
+                    model_used="Valkey Ephemeral Cache (5-min TTL, 0 Tokens)",
+                    mode=current_mode,
+                    action_executed={"mrn": active_mrn, "cache_hit": True, "ttl_remaining": "active"}
+                )
+
+            # 2. Live DB Lookup (Safe SELECT)
+            demo_sql = f"""
+            SELECT TOP 1
+                pbd.Permanent_MRN_No,
+                ISNULL(pbed.Patient_First_Name, pbd.Patient_First_Name) AS Patient_First_Name,
+                ISNULL(pbed.Patient_Middle_Name, pbd.Patient_Middle_Name) AS Patient_Middle_Name,
+                ISNULL(pbed.Patient_Last_Name, pbd.Patient_Last_Name) AS Patient_Last_Name,
+                ISNULL(pbed.Contact_Phone_Mobile, pbd.Contact_Phone_Mobile) AS Contact_Phone_Mobile,
+                ISNULL(pbed.Contact_Email, pbd.Contact_Email) AS Contact_Email,
+                pbd.Gender_Code,
+                pbd.Patient_DOB,
+                pbed.Emirates_Id
+            FROM Patient_Basic_Details pbd WITH(NOLOCK)
+            LEFT JOIN Patient_Basic_Encript_Details pbed WITH(NOLOCK) 
+                ON pbd.Patient_Basic_Details_Serial_No = pbed.Patient_Basic_Details_Serial_No
+            WHERE pbd.Permanent_MRN_No = '{active_mrn}'
+            """
+            raw_demo = autonomous_agent.execute_select_sql(demo_sql)
+            demo_data = json.loads(raw_demo) if raw_demo and raw_demo.startswith("[") else []
+            if demo_data:
+                p = demo_data[0]
+                first = (p.get("Patient_First_Name") or "").strip()
+                middle = (p.get("Patient_Middle_Name") or "").strip()
+                last = (p.get("Patient_Last_Name") or "").strip()
+                full_name = " ".join([w for w in [first, middle, last] if w]) or "Registered Patient"
+                gender = "Female" if p.get("Gender_Code") == "F" else ("Male" if p.get("Gender_Code") == "M" else (p.get("Gender_Code") or "-"))
+                mobile = p.get("Contact_Phone_Mobile") or "-"
+                dob = str(p.get("Patient_DOB") or "-").split("T")[0]
+                eid = p.get("Emirates_Id") or "-"
+
+                if current_mode == "developer":
+                    reply = (
+                        f"### 👤 Patient Master Record: `{active_mrn}`\n\n"
+                        f"• **Full Name:** **{full_name}**\n"
+                        f"• **MRN:** `{active_mrn}` (Exact Match Verified)\n"
+                        f"• **Gender:** `{gender}` | **DOB:** `{dob}`\n"
+                        f"• **Mobile:** `{mobile}` | **Emirates ID:** `{eid}`\n\n"
+                        f"*(⚡ Retrieved live from MSSQL `Patient_Basic_Details` with 0 LLM Tokens, cached in Valkey for 5 mins)*"
+                    )
+                else:
+                    reply = (
+                        f"Vanakkam! MRN **{active_mrn}** patient-oda details itho:\n\n"
+                        f"• 👤 **Patient Name:** **{full_name}**\n"
+                        f"• 🆔 **MRN Number:** `{active_mrn}`\n"
+                        f"• ⚧️ **Gender:** {gender}\n"
+                        f"• 📞 **Mobile:** {mobile}\n\n"
+                        f"Intha patient-oda visit details illa billing pathi ethavathu theriyanuma?"
+                    )
+                
+                # Cache in Valkey for 5 minutes (300s)
+                valkey_manager.cache_patient_snapshot(active_mrn, "demographics", reply, ttl=300)
+                update_session_memory(payload.session_id, payload.message, reply)
+                valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
+                return ChatResponse(
+                    status="success",
+                    reply=reply,
+                    model_used="HIMES Deterministic Engine (0 LLM Tokens, Live DB)",
+                    mode=current_mode,
+                    action_executed={"mrn": active_mrn, "cached_valkey_5m": True}
+                )
+
+        # Core Concept: Patient Services & Encounter Orders Inquiry
+        is_services_query = (
+            active_mrn and any(w in msg_lower for w in ["service", "cpt", "test", "bill", "order", "lab", "பில்", "பரிசோதனை", "சிகிச்சை", "فحوصات", "خدمات"])
+        )
+        if is_services_query and active_visit:
+            # Core Concept: Unbilled / Pending vs All Services
+            is_unbilled_only = any(w in msg_lower for w in ["unbilled", "un-billed", "pending", "not bill", "podadha", "aagadha", "ஆகாத", "போடாத", "நிலுவை"]) or ("غير" in msg_lower and "مفوتر" in msg_lower)
+            from utils.table_formatter import detect_language
+            query_lang = detect_language(payload.message)
+            aspect_key = f"{active_visit}:{'unbilled' if is_unbilled_only else 'all_services'}:{current_mode}:{query_lang}"
+            
+            # 1. Check Valkey Ephemeral Cache (5-Minute TTL)
+            cached_srv = valkey_manager.get_patient_snapshot(active_mrn, aspect_key)
+            if cached_srv:
+                update_session_memory(payload.session_id, payload.message, cached_srv)
+                return ChatResponse(
+                    status="success",
+                    reply=cached_srv,
+                    model_used="Valkey Ephemeral Cache (5-min TTL, 0 Tokens)",
+                    mode=current_mode,
+                    action_executed={"mrn": active_mrn, "visit_no": active_visit, "cache_hit": True}
+                )
+
+            # 2. Query Live Database (NO arbitrary TOP 5 truncation; fetch all up to 100)
+            filter_sql = "AND pvs.Is_Service_Billed = 'N'" if is_unbilled_only else ""
             srv_sql = f"""
-            SELECT 
+            SELECT TOP 100
                 pvbd.Permanent_Visit_No,
                 pbd.Permanent_MRN_No,
                 pvs.Patient_Visit_Services_Serial_No,
@@ -802,54 +942,42 @@ def chat_with_agent(payload: ChatRequest):
               AND pbd.Permanent_MRN_No = '{active_mrn}'
               AND pvs.Active_Status = 'A'
               AND pvs.Patient_Visit_Service_Cancellation_Flag = 'N'
-              AND pvs.Is_Service_Billed = 'N'
+              {filter_sql}
             ORDER BY pvs.Patient_Visit_Services_Serial_No DESC
             """
             raw_srv = autonomous_agent.execute_select_sql(srv_sql)
             srv_list = json.loads(raw_srv) if raw_srv and raw_srv.startswith("[") else []
             if srv_list:
-                rows = ""
-                for item in srv_list:
-                    cpt = item.get("CPT_Code") or "-"
-                    int_code = item.get("Service_Internal_Code") or "-"
-                    desc = item.get("Service_Description") or "Unknown Service"
-                    rows += f"| {cpt} | {int_code} | {desc} |\n"
+                from utils.table_formatter import format_user_friendly_response
+                reply = format_user_friendly_response(
+                    srv_list,
+                    query_context={
+                        "user_query": payload.message,
+                        "mrn": active_mrn,
+                        "visit_no": active_visit,
+                        "executed_sql": srv_sql
+                    },
+                    mode=current_mode
+                )
                 
-                if current_mode == "developer":
-                    reply = (
-                        f"### 📋 Active Unbilled Services for Patient MRN: `{active_mrn}`, Visit: `{active_visit}`\n\n"
-                        f"• **Patient MRN:** `{active_mrn}` (Exact Match Verified)\n"
-                        f"• **Visit No:** `{active_visit}` (Visit Serial: `{sess['active_entities'].get('visit_serial', 'N/A')}`)\n"
-                        f"• **Billing Status:** Unbilled (`Is_Service_Billed = 'N'`)\n\n"
-                        f"**Active Unbilled Services List ({len(srv_list)} records):**\n\n"
-                        f"| CPT Code | Internal Code | Service Description |\n"
-                        f"| :--- | :--- | :--- |\n"
-                        f"{rows}\n"
-                        f"> ℹ️ **Action:** Intha services innum finalize aagala. Patient Billing screen-la bill finalize pannikalam.\n\n"
-                        f"*(⚡ Live MSSQL records verified with exact patient and visit match)*"
-                    )
-                else:
-                    reply = (
-                        f"Vanakkam! Intha visit-la (MRN: **{active_mrn}**, Visit No: **{active_visit}**) innum bill pannama iruka active services-oda details itho:\n\n"
-                        f"✅ **Active Services List:**\n"
-                        f"Ippo intha visit-la **{len(srv_list)}** services active-ah iruku:\n\n"
-                        f"| CPT Code | Internal Code | Service Description |\n"
-                        f"| :--- | :--- | :--- |\n"
-                        f"{rows}\n"
-                        f"Intha service-ku innum billing finalize aagala, so neenga billing screen-la ithai process pannikalam. Vera ethavathu help venuma?"
-                    )
+                # Cache in Valkey for 5 minutes (300s)
+                valkey_manager.cache_patient_snapshot(active_mrn, aspect_key, reply, ttl=300)
+                valkey_manager.cache_ephemeral_query(
+                    payload.message,
+                    active_mrn=active_mrn or "",
+                    session_id=payload.session_id,
+                    formatted_response=reply,
+                    executed_sql=srv_sql,
+                    ttl=300
+                )
                 update_session_memory(payload.session_id, payload.message, reply)
                 valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
                 return ChatResponse(
                     status="success",
                     reply=reply,
-                    model_used="HIMES Billing Engine (Verified)",
+                    model_used="HIMES Deterministic Engine (0 LLM Tokens, Live DB)",
                     mode=current_mode,
-                    action_executed={
-                        "mrn": active_mrn,
-                        "visit_no": active_visit,
-                        "unbilled_services_count": len(srv_list)
-                    }
+                    action_executed={"mrn": active_mrn, "visit_no": active_visit, "services_count": len(srv_list), "cached_valkey_5m": True}
                 )
 
         # 1. Valkey Fast-Path: Menu Navigation Lookup
@@ -912,48 +1040,6 @@ def chat_with_agent(payload: ChatRequest):
         clean_route = current_path.strip("/").split("/")[-1].lower() if current_path else ""
         refers_to_current_screen = any(w in msg_lower for w in ["intha screen", "this screen", "current screen", "intha page", "this page", "screen ah", "screen-a", "screen pathi", "module ah paaru", "screen ah paaru"]) or (clean_route and clean_route in msg_lower)
         
-        # Dedicated handler for Global View of OP Pharmacy screen records / counts
-        is_pharmacy_screen = "viewglobaloppharmacy" in clean_route or any(p in msg_lower for p in ["global view of pharmacy", "global view of op pharmacy", "viewglobaloppharmacy", "op pharmacy"])
-        is_count_query = any(w in msg_lower for w in ["count", "last month", "records", "clinic", "pharmacy", "matched", "replied", "patient", "how many"])
-        if is_pharmacy_screen and is_count_query and not bool(v_m or m_m):
-            if current_mode == "developer":
-                reply = (
-                    "### 🏥 Global View of OP Pharmacy — September 2026 Records Breakdown\n\n"
-                    "• **Screen Route:** `/viewGlobalOPPharmacy`\n"
-                    "• **Controller:** `GlobalViewIPPharmacyController@viewGlobalIPPharmacy` (`getGlobalFilterIPPharmacy`)\n"
-                    "• **Active Filter:** `Month` (Full Calendar Month: `01-09-2026` to `30-09-2026`)\n\n"
-                    "**Verified Database Counts:**\n"
-                    "• 🏥 **Clinic Prescriptions (HA Tab):** **16** patient visits\n"
-                    "  - *SQL Query:* `SELECT COUNT(DISTINCT pvbd.Permanent_Visit_No) FROM Patient_Visit_Drugs_Prescribed pvdp JOIN Patient_Visit_Basic_Details pvbd ON pvdp.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No AND pvbd.Is_EMR_In_Progress = 'Y' AND pvbd.Visit_Cancellation_Flag = 'N' WHERE pvdp.Active_Status = 'A' AND CAST(pvbd.Patient_Visit_Registered_Date_Time AS DATE) BETWEEN '2026-09-01' AND '2026-09-30'`\n"
-                    "  - *Active Visits on Screen:* `16915, 16899, 16896, 16885, 16850, 16849, 16833, 16821, 16794, 16777, 16776, 16748, 16741, 16738, 16737, 16735`\n"
-                    "• 💊 **Direct Pharmacy (PH Tab):** **20** patient visits\n"
-                    "  - *SQL Query:* `SELECT COUNT(DISTINCT Pharmacy_Permanent_Visit_No) FROM Pharmacy_Patient_Visit_Basic_Details WHERE CAST(Patient_Visit_Registered_Date_Time AS DATE) BETWEEN '2026-09-01' AND '2026-09-30'`\n"
-                    "• 📊 **Total Records:** **36** patient visits (16 Clinic + 20 Pharmacy)\n\n"
-                    "*(⚡ Live verified MSSQL records matching HIMES application screen)*"
-                )
-            else:
-                reply = (
-                    "### 🏥 Global View of OP Pharmacy — September 2026 Records\n\n"
-                    "HIMES Application-la **Global View of OP Pharmacy** screen-la **Month** filter (`01-09-2026` to `30-09-2026`) choose pannirukkumbothu, live database records count itho:\n\n"
-                    "• 🏥 **Clinic Prescriptions (HA Tab):** **16** records\n"
-                    "• 💊 **Direct Pharmacy (PH Tab):** **20** records\n\n"
-                    "> ✅ **Total Verified Records:** **36** patient visits (16 Clinic + 20 Pharmacy).\n\n"
-                    "*(Munnaadi chatbox relative 30 days date range eduthathala 9 nu kaattiyirundhadhu; ippo screen-oda exact calendar month filter `01-09-2026` to `30-09-2026` sync panniyachu, screen-la irukkura 16 clinic records-um exact-ah match aaguthu!)*"
-                )
-            update_session_memory(payload.session_id, payload.message, reply)
-            return ChatResponse(
-                status="success",
-                reply=reply,
-                model_used="HIMES Pharmacy Engine (Verified)",
-                mode=current_mode,
-                action_executed={
-                    "screen": "viewGlobalOPPharmacy",
-                    "clinic_count": 16,
-                    "pharmacy_count": 20,
-                    "total": 36,
-                    "month": "September 2026"
-                }
-            )
 
         if clean_route and refers_to_current_screen and not bool(v_m or m_m):
             screen_data = valkey_manager._get(f"himes:screen:{clean_route}")
@@ -1046,10 +1132,12 @@ def chat_with_agent(payload: ChatRequest):
                         )
 
         # 2. Check ChromaDB Semantic Cache (distance <= 0.30)
-        has_entities_in_query = bool(v_m or m_m)
-        is_followup = not has_entities_in_query and bool(sess["active_entities"].get("visit_no") or sess["active_entities"].get("mrn"))
+        # Healthcare Privacy & Real-Time Data Freshness Guardrail: NEVER cache patient, encounter, or clinical PHI!
+        is_patient_query = bool(v_m or m_m) or is_patient_or_phi_data(payload.message)
+        is_followup = not is_patient_query and bool(sess["active_entities"].get("visit_no") or sess["active_entities"].get("mrn"))
         
-        if not is_followup:
+        # Grounding & PHI Rule: Only check semantic cache for static system/menu queries
+        if not is_followup and not is_patient_query:
             cached_result = check_semantic_cache(payload.message, threshold=0.30)
             if cached_result:
                 c_answer = cached_result["answer"]
@@ -1090,13 +1178,34 @@ def chat_with_agent(payload: ChatRequest):
         # Sync active session state into Valkey
         valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
 
-        # 3. Dispatch to HIMES Multi-Agent Specialist Orchestrator
-        classified_intent = himes_orchestrator.classify_intent(effective_message, full_context)
-        if classified_intent == "engineering_dev":
-            current_mode = "developer"
-            is_developer_mode = True
+        # 3. Dispatch to Dynamic Multi-Step Chain OR HIMES Multi-Agent Specialist Orchestrator
+        from chains.multi_step_clinical_chain import is_multi_step_query, run_multi_step_clinical_chain
 
-        agent_res = himes_orchestrator.dispatch(effective_message, full_context, is_dev_mode=is_developer_mode)
+        if is_multi_step_query(effective_message):
+            chain_res = run_multi_step_clinical_chain(
+                message=effective_message,
+                mrn=active_ents_to_pass.get("mrn"),
+                visit_no=active_ents_to_pass.get("visit_no"),
+                mode=current_mode,
+                session_id=payload.session_id,
+                context=full_context,
+            )
+            agent_res = {
+                "reply": chain_res.get("reply", "No response generated."),
+                "agent": chain_res.get("model_used", "HIMES Universal Multi-Step Chain"),
+                "status": chain_res.get("status", "success"),
+                "actions_taken": [
+                    {"action": "multi_step_execution", "steps": len(chain_res.get("steps_run", []))}
+                ],
+                "steps": len(chain_res.get("steps_run", [])),
+            }
+        else:
+            classified_intent = himes_orchestrator.classify_intent(effective_message, full_context)
+            if classified_intent == "engineering_dev":
+                current_mode = "developer"
+                is_developer_mode = True
+
+            agent_res = himes_orchestrator.dispatch(effective_message, full_context, is_dev_mode=is_developer_mode)
         reply_text = agent_res.get("reply", "No response generated.")
         actions_taken = agent_res.get("actions_taken", [])
         specialist_name = agent_res.get("agent", "Autonomous Agent (Live MSSQL Engine)")
@@ -1120,8 +1229,8 @@ def chat_with_agent(payload: ChatRequest):
         update_session_memory(payload.session_id, payload.message, reply_text)
         valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
 
-        # 4. Save into ChromaDB Semantic Cache for future instant lookups (skip follow-ups lacking standalone context)
-        if not is_followup:
+        # 4. Save into ChromaDB Semantic Cache (STRICTLY PROHIBITED for patient/visit data)
+        if not is_followup and not is_patient_query and not is_patient_or_phi_data(payload.message, reply_text):
             save_to_semantic_cache(payload.message, reply_text)
 
         return ChatResponse(
@@ -1160,6 +1269,153 @@ def chat_with_agent(payload: ChatRequest):
             mode=curr_m,
             action_executed={"error": str(e)}
         )
+
+# ====================================================================
+# LANGCHAIN MULTI-STEP CHAIN ENDPOINT
+# POST /api/agent/chain
+# Triggered ONLY for complex multi-intent queries (unbilled + pricing + insurance).
+# Simple single-intent queries continue through /api/chat Tier-1 engine.
+# ====================================================================
+
+class ChainRequest(BaseModel):
+    message: str
+    session_id: str = "default"
+    mrn: Optional[str] = None
+    visit_no: Optional[str] = None
+    mode: Optional[str] = "user"
+    context: Optional[Dict[str, Any]] = None
+
+class ChainResponse(BaseModel):
+    status: str
+    reply: str
+    model_used: str
+    steps_run: List[Dict[str, Any]] = []
+    mrn: Optional[str] = None
+    visit_no: Optional[str] = None
+
+@app.post("/api/agent/chain", response_model=ChainResponse)
+def run_clinical_chain(payload: ChainRequest):
+    """
+    LangChain Multi-Step Clinical Chain endpoint.
+    Handles complex queries that require:
+      Step 1: Unbilled service SQL
+      Step 2: Tariff/pricing cross-reference
+      Step 3: ChromaDB RAG insurance policy lookup
+      Step 4: Synthesis into unified response card
+
+    The Laravel frontend may call this endpoint directly for complex questions,
+    or /api/chat auto-routes here when is_multi_step_query() returns True.
+    """
+    try:
+        enforce_safety_rules(payload.message)
+
+        # Resolve entities from session memory
+        from memory.session_memory import get_session_memory
+        from chains.multi_step_clinical_chain import is_multi_step_query, run_multi_step_clinical_chain
+        from utils.table_formatter import detect_language
+
+        session_mem = get_session_memory(payload.session_id)
+        active_ents = session_mem.get_active_entities()
+
+        mrn = payload.mrn or active_ents.get("mrn")
+        visit_no = payload.visit_no or active_ents.get("visit_no")
+        lang = detect_language(payload.message)
+        mode = payload.mode or valkey_manager.get_session_mode(payload.session_id)
+
+        result = run_multi_step_clinical_chain(
+            message=payload.message,
+            mrn=mrn,
+            visit_no=visit_no,
+            lang=lang,
+            mode=mode,
+            session_id=payload.session_id,
+            context=payload.context,
+        )
+
+        return ChainResponse(
+            status=result.get("status", "success"),
+            reply=result.get("reply", ""),
+            model_used=result.get("model_used", ""),
+            steps_run=result.get("steps_run", []),
+            mrn=result.get("mrn"),
+            visit_no=result.get("visit_no"),
+        )
+
+    except SecurityException as se:
+        return ChainResponse(
+            status="blocked_by_guardrails",
+            reply=f"⚠️ Guardrail: {str(se)}",
+            model_used="Security Guardrail",
+        )
+    except Exception as e:
+        return ChainResponse(
+            status="error",
+            reply=f"⚠️ Chain error: {str(e)}",
+            model_used="Error Handler",
+        )
+
+
+# ====================================================================
+# MCP SERVER ENDPOINTS
+# ====================================================================
+
+import json as _json
+
+@app.get("/mcp/mssql")
+def mcp_mssql_info():
+    """MCP MSSQL Inspection Server — returns capabilities manifest."""
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "mcp_servers.json")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = _json.load(f)
+        return cfg.get("mcp_servers", {}).get("mssql_inspection", {})
+    except Exception:
+        return {"name": "HIMES MSSQL Inspection MCP", "status": "config_not_found"}
+
+@app.post("/mcp/mssql/inspect")
+def mcp_inspect_table(payload: Dict[str, Any]):
+    """MCP: Inspect MSSQL table schema. Input: {'table_name': str}"""
+    from agents.sql_agent import _build_agent_tools
+    tools = {t.name: t for t in _build_agent_tools()}
+    table = payload.get("table_name", "")
+    if not table:
+        return {"error": "table_name is required"}
+    return {"schema": tools["inspect_table_schema"].func(table)}
+
+@app.post("/mcp/mssql/query")
+def mcp_execute_query(payload: Dict[str, Any]):
+    """MCP: Execute a read-only SQL query. Input: {'sql': str}"""
+    from agents.sql_agent import _build_agent_tools
+    tools = {t.name: t for t in _build_agent_tools()}
+    sql = payload.get("sql", "")
+    if not sql:
+        return {"error": "sql is required"}
+    try:
+        enforce_safety_rules(sql)
+    except SecurityException as se:
+        return {"error": f"BLOCKED: {se}"}
+    return {"result": tools["execute_read_only_sql"].func(sql)}
+
+@app.post("/mcp/clinical/search")
+def mcp_clinical_search(payload: Dict[str, Any]):
+    """MCP: ChromaDB hybrid search for clinical policies. Input: {'query': str, 'top_k': int}"""
+    try:
+        from retrieval.hybrid_search import hybrid_search_engine
+        q = payload.get("query", "")
+        k = int(payload.get("top_k", 3))
+        if not hybrid_search_engine._index_built:
+            hybrid_search_engine.build_bm25_index_from_store()
+        result = hybrid_search_engine.search(q, top_k=k)
+        return {"chunks": result.get("top_chunks", []), "query": q}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/skills")
+def list_agent_skills():
+    """Returns the registered HIMES agent skills manifest."""
+    from skills.himes_skills import list_skills
+    return {"skills": list_skills()}
+
 
 if __name__ == "__main__":
     import uvicorn

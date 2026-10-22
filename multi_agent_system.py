@@ -27,6 +27,7 @@ from valkey_himes_manager import valkey_manager
 from memory_manager import search_knowledge_base
 from autonomous_agent import autonomous_agent
 from guardrails import SecurityException
+from generation.rag_pipeline import rag_pipeline
 
 # ---------------------------------------------------------------------------
 # Base Specialist Agent
@@ -131,23 +132,15 @@ class HospitalKnowledgeAgent(BaseSpecialistAgent):
             formatted_reply = f"### 📘 {title}\n\n{summary}\n\n*(Verified against authoritative HIMES Clinical SOP)*"
             return {"reply": formatted_reply, "agent": self.name, "source": "valkey_clinical_sop"}
 
-        # 3. ChromaDB Semantic Search Fallback
-        kb_results = self.search_clinical_kb(query, n_results=3)
-        if kb_results:
-            context_blocks = "\n\n".join([f"Source: {res.get('metadata', {}).get('source', 'SOP')}\n{res.get('document', '')}" for res in kb_results])
-            system_prompt = (
-                "You are the HIMES Hospital Knowledge Specialist. Answer the user question based strictly "
-                "on the retrieved hospital clinical SOP knowledge base. Provide clear bullet points and actionable criteria."
-            )
-            prompt = (
-                f"User Query: {query}\n\n"
-                f"Retrieved Clinical SOP Context:\n{context_blocks}\n\n"
-                f"Please formulate a clear and professional clinical answer in friendly Tanglish / English."
-            )
-            answer = self.call_llm(prompt, system_prompt)
-            return {"reply": answer, "agent": self.name, "source": "chromadb_clinical_kb"}
-
-        return {"reply": "No specific clinical SOP matched. Please refine your query.", "agent": self.name, "source": "none"}
+        # 3. Advanced Hybrid RAG Engine (BM25 + Chroma Dense + RRF + Grounded Citations)
+        rag_res = rag_pipeline.answer_query(query, is_developer_mode=is_dev_mode)
+        return {
+            "reply": rag_res["reply"],
+            "agent": self.name,
+            "source": "hybrid_rag_pipeline",
+            "citations": rag_res.get("citations", []),
+            "latency_ms": rag_res.get("latency_ms", 0.0)
+        }
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,58 @@
+{
+  "_comment": "HIMES MCP Server Configuration — Model Context Protocol servers exposed by the FastAPI microservice.",
+
+  "mcp_servers": {
+    "mssql_inspection": {
+      "name": "HIMES MSSQL Inspection MCP",
+      "description": "Safely exposes MSSQL schema metadata and FK linkages. Never returns raw credentials. SELECT-only.",
+      "endpoint": "http://127.0.0.1:8050/mcp/mssql",
+      "capabilities": [
+        "inspect_table_schema",
+        "list_tables",
+        "validate_foreign_keys",
+        "execute_read_only_sql"
+      ],
+      "guardrails": {
+        "allowed_operations": ["SELECT"],
+        "blocked_operations": ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE"],
+        "max_rows": 100,
+        "nolock_required": true
+      }
+    },
+
+    "filesystem_codebase": {
+      "name": "HIMES Filesystem & Codebase MCP",
+      "description": "Read-only access to /L9/nagul/himes-ai for SOP docs, config, and unit test execution.",
+      "endpoint": "http://127.0.0.1:8050/mcp/filesystem",
+      "allowed_base_path": "/L9/nagul/himes-ai",
+      "capabilities": [
+        "read_file",
+        "search_code",
+        "list_directory",
+        "run_unit_test"
+      ],
+      "guardrails": {
+        "write_access": false,
+        "delete_access": false,
+        "allowed_extensions": [".php", ".py", ".json", ".md", ".blade.php", ".env.example"],
+        "blocked_paths": [".env", "storage/logs", "vendor"]
+      }
+    },
+
+    "clinical_policy": {
+      "name": "HIMES Clinical Policy Fetch MCP",
+      "description": "Dynamic retrieval of ICD-10, CPT codes and drug interaction data. ChromaDB-backed RAG.",
+      "endpoint": "http://127.0.0.1:8050/mcp/clinical",
+      "capabilities": [
+        "search_icd10",
+        "search_cpt_code",
+        "drug_interaction_check",
+        "insurance_policy_lookup"
+      ],
+      "backends": {
+        "primary": "chromadb_hybrid_search",
+        "fallback": "valkey_cached_policies"
+      }
+    }
+  }
+}

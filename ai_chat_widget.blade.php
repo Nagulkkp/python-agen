@@ -504,10 +504,10 @@
         </div>
       </div>
       <div class="himes-ai-header-controls">
-        <!-- Dual Mode Badge Toggle -->
-        <div id="himes-ai-mode-badge" class="himes-ai-mode-badge user-mode" onclick="toggleModeClick()" title="Click to toggle User View / Developer View">
+        <!-- Dual Mode Badge Toggle (Hidden per user preference) -->
+        <div id="himes-ai-mode-badge" class="himes-ai-mode-badge user-mode" style="display:none;" onclick="toggleModeClick()">
           <span id="himes-mode-icon">👤</span>
-          <span id="himes-mode-text">User View</span>
+          <span id="himes-mode-text">Assistant</span>
         </div>
         <!-- Maximize / Popup Modal Button -->
         <button id="himes-ai-max-btn" class="himes-ai-icon-btn" onclick="toggleHimesMaximize()" title="Expand to Full Popup Modal">
@@ -526,8 +526,8 @@
     <!-- Quick Action Chips -->
     <div class="himes-ai-chips">
       <div class="himes-ai-chip" onclick="quickTask('price list management menu enga iruku?')">💰 Price List Menu</div>
-      <div class="himes-ai-chip" onclick="quickTask('Check the latest error in storage/logs/laravel.log and explain how to fix it')">🔍 Check Latest Error</div>
-      <div class="himes-ai-chip" onclick="toggleModeClick()">🔄 Toggle Dev/User Mode</div>
+      <div class="himes-ai-chip" onclick="quickTask('Global View of OP Pharmacy screen-la records count evlo?')">💊 Pharmacy Records</div>
+      <div class="himes-ai-chip" onclick="quickTask('Recent patient visits list kaattu')">📋 Patient Visits</div>
       <div class="himes-ai-chip" onclick="quickTask('Check server disk space, memory, and uptime')">🩺 System Health</div>
       <div class="himes-ai-chip" onclick="quickTask('Show recent git changes and current branch in himes-ai')">🌿 Git Status</div>
     </div>
@@ -535,11 +535,8 @@
     <!-- Chat Messages -->
     <div class="himes-ai-messages" id="himes-ai-msg-list">
       <div class="himes-ai-msg agent">
-        👋 <strong>Vanakkam Nagul!</strong><br>
-        I am your <strong>HIMES Autonomous AI Developer & Assistant Agent</strong>.<br><br>
-        • In <strong>User View</strong>: I provide clean, plain-language hospital summaries, status cards, and screen locations.<br>
-        • In <strong>Developer View</strong>: I provide full technical diagnostics, live SELECT SQL queries, file paths, and git traces.<br><br>
-        <em>💡 Tip: You can drag & drop error logs, SQL files, or images directly into this chat!</em>
+        👋 <strong>Hi, Nagul!</strong><br>
+        How can I help you today?
       </div>
     </div>
 

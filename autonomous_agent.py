@@ -348,7 +348,29 @@ You operate just like an advanced agentic assistant (like Antigravity):
   2. Use your tools to find the relevant route/controller/model in the codebase or query the database directly.
   3. Formulate the exact SQL query (SELECT ONLY) needed.
   4. Execute the query live on the database using execute_select_sql.
-  5. Return the actual live facts cleanly to the user in friendly Tanglish / Tamil + English.
+  5. Return the actual live facts cleanly to the user in the matching language (Tamil / Tanglish / Arabic / English).
+
+UNIVERSAL MULTILINGUAL PROCESSING (ANY WORLD LANGUAGE - TAMIL, ARABIC, HINDI, MALAYALAM, TELUGU, RUSSIAN, FRENCH, SPANISH, TAGALOG, ENGLISH, ETC.):
+- You possess native, fluent comprehension of ALL human languages and scripts:
+  * Pure Tamil (தமிழ்), Tanglish
+  * Arabic (العربية)
+  * Hindi (हिन्दी), Hinglish
+  * Malayalam (മലയാളം), Manglish
+  * Telugu (తెలుగు), Kannada (ಕನ್ನಡ), Urdu (اردو), Bengali (বাংলা)
+  * Russian (Русский), French (Français), Spanish (Español), Tagalog (Filipino), German (Deutsch)
+  * English (Global Standard)
+- Core Processing Rules:
+  1. Accurately understand the clinical, billing, and administrative intent regardless of how the user expresses it in ANY language, slang, or script.
+  2. Map concepts directly to HIMES SQL Conditions:
+     - Unbilled / Pending (e.g. "bill aagadha", "பில் ஆகாத", "غير مفوتر", "बिना बिल", "ബിൽ ചെയ്യാത്ത", "non facturé", "no facturado", "неоплаченный") -> `pvs.Is_Service_Billed = 'N'`
+     - Tests / Services / Procedures (e.g. "test", "சிகிச்சை", "பரிசோதனை", "فحوصات", "जांच", "പരിശോധന", "examens", "pruebas", "анализы") -> Join `Patient_Visit_Services`
+     - Prescriptions / Drugs (e.g. "marunthu", "மருந்து", "أدوية", "दवाइयां", "മരുന്നുകൾ", "médicaments", "medicamentos", "лекарства") -> Join `Patient_Visit_Drugs_Prescribed`
+     - Lab Orders & Results (e.g. "lab", "இரத்த பரிசோதனை", "نتائج التحاليل", "लैब टेस्ट", "ലാബ് ഫലങ്ങൾ", "résultats de labo") -> Join `Patient_Visit_Lab_Order` & `Lab_Order_Item_Result`
+  3. Formulate a 100% Read-Only MSSQL `SELECT` query using `WITH(NOLOCK)`.
+  4. Execute the query live on the database using `execute_select_sql`.
+  5. Under `Final Answer:`, output a concise 1-2 sentence intent summary in the EXACT SAME LANGUAGE the user queried in (or friendly Tanglish/Hinglish/Manglish if the user used transliteration).
+  6. DO NOT manually retype long multi-row tables into your answer; our Zero-Token presentation layer will automatically bind the structured action card and collapsible breakdown table to your summary!
+
 - If the user asks for code changes / bug fixes:
   1. Find the file and inspect the code.
   2. Edit the file using `edit_file`.
@@ -563,13 +585,10 @@ HIMES ARCHITECTURE & DATABASE SCHEMA GUIDANCE:
              AND CAST(pvbd.Patient_Visit_Registered_Date_Time AS DATE) <= '<to_date>'
            ```
     - CALENDAR MONTH / DATE RANGE RULES:
-      * When the user asks about "last month" or the "Month" filter in `/viewGlobalOPPharmacy`:
-        - In HIMES, the "Month" radio filter selects the complete previous calendar month: `From 01-09-2026 To 30-09-2026` (September 2026).
-        - NEVER use a relative 30-day window (`DATEADD(day, -30, GETDATE())`) which drops early September visits!
-        - For September 2026 (`01-09-2026` to `30-09-2026`):
-          • Clinic Prescriptions (HA Tab): **16** patient visits (Visits: 16915, 16899, 16896, 16885, 16850, 16849, 16833, 16821, 16794, 16777, 16776, 16748, 16741, 16738, 16737, 16735)
-          • Direct Pharmacy (PH Tab): **20** patient visits
-          • Total Records: **36** visits (16 Clinic + 20 Pharmacy)
+      * When the user asks about "last month", "this month", "today", or date filters:
+        - In HIMES, calculate the exact start and end date for that calendar period (e.g. `YYYY-MM-01` to `YYYY-MM-last_day`).
+        - ALWAYS run the live COUNT queries dynamically to fetch real-time counts from MSSQL.
+        - NEVER use hardcoded or guessed numbers; report only verified rows returned by the live database!
   * When searching for an MRN:
     - ALWAYS check BOTH `patient_basic_details` (general hospital MRNs) AND `Pharmacy_Patient_Basic_Details` (for Pharmacy MRNs starting with PHAR)!
 
@@ -696,6 +715,11 @@ DUAL RESPONSE SYSTEM MODE: 💻 DEVELOPER VIEW (FULL TECHNICAL DETAILS)
   • SQL Queries Executed (SELECT only) with table relationships
   • ChromaDB / Valkey Cache Lookup Details
 - Format all code, SQL, and logs inside Markdown code blocks with language identifiers (```sql, ```php, ```bash) to enable copy-to-clipboard functionality.
+- LANGUAGE MIRRORING RULE:
+  • If user asks in Pure Tamil (தமிழ் எழுத்துகளில்): Answer strictly in Pure Tamil (தமிழ்).
+  • If user asks in Tanglish (Romanized Tamil words like 'enga iruku', 'kaattu', 'solllu', etc.): Answer strictly in natural, helpful Tanglish.
+  • If user asks in English: Answer strictly in professional English.
+- NEVER talk about or explain "User View" or "Developer View" to the user!
 """
         else:
             system_prompt += """
@@ -710,7 +734,11 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
     - ✅ Green checkmark status cards for confirmed data / success (e.g. ✅ **Status:** Confirmed / Billed)
     - ⚠️ Friendly alerts for pending items or issues (e.g. ⚠️ **Status:** In Progress / Pending)
     - ℹ️ Plain-language action summaries (e.g. "We have identified the issue in the Billing section and our system has initiated an automatic resolution. Status: In Progress").
-  • Polite, friendly Tanglish / English appropriate for hospital doctors, nurses, billing, and front-desk staff.
+  • LANGUAGE MIRRORING RULE:
+    - If user asks in Pure Tamil (தமிழ் எழுத்துகளில்): Answer strictly in Pure Tamil (தமிழ்).
+    - If user asks in Tanglish (Romanized Tamil words): Answer strictly in natural, friendly Tanglish.
+    - If user asks in English: Answer strictly in professional English.
+  • NEVER talk about or explain "User View" or "Developer View" to the user!
 """
 
         context_guidance = ""
@@ -752,6 +780,54 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
         ]
         actions_taken = []
         max_iterations = 10
+        last_sql_query = None
+        last_sql_results = None
+
+        active_mrn = str((context or {}).get("active_entities", {}).get("mrn") or "")
+        session_id = str((context or {}).get("session_id") or "default_session")
+
+        # ---------------------------------------------------------------------
+        # Valkey 5-Minute Ephemeral Caching Skill (SHA256 Hash Key)
+        # ---------------------------------------------------------------------
+        try:
+            from valkey_himes_manager import valkey_manager
+            cached_query = valkey_manager.get_ephemeral_query(user_task, active_mrn=active_mrn, session_id=session_id)
+            if cached_query and isinstance(cached_query, dict):
+                cached_reply = cached_query.get("formatted_response") or ""
+                cached_sql = cached_query.get("executed_sql") or ""
+                if cached_reply:
+                    return {
+                        "status": "success",
+                        "reply": cached_reply,
+                        "actions_taken": [],
+                        "steps": 0,
+                        "sql_results": [],
+                        "executed_sql": cached_sql,
+                        "model_used": "Valkey Ephemeral Cache (5-min TTL, 0 Tokens)"
+                    }
+        except Exception as ve:
+            print(f"[ValkeyCache] Notice: {ve}")
+
+        def attach_formatted_sql_card(text: str) -> str:
+            if last_sql_results and isinstance(last_sql_results, list) and len(last_sql_results) >= 1:
+                try:
+                    from utils.table_formatter import format_user_friendly_response
+                    active_visit = (context or {}).get("active_entities", {}).get("visit_no")
+                    formatted_card = format_user_friendly_response(
+                        last_sql_results,
+                        query_context={
+                            "user_query": user_task,
+                            "mrn": active_mrn,
+                            "visit_no": active_visit,
+                            "executed_sql": last_sql_query
+                        },
+                        mode="developer" if is_dev_mode else "user"
+                    )
+                    if formatted_card:
+                        return f"{text}\n\n{formatted_card}"
+                except Exception as fe:
+                    print(f"[TableFormatter] notice: {fe}")
+            return text
 
         for step in range(max_iterations):
             prompt_input = "\n\n".join(history)
@@ -784,11 +860,29 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
             if "Final Answer:" in llm_response and "Action:" not in llm_response:
                 final_text = llm_response.split("Final Answer:", 1)[-1].strip()
                 final_text = re.sub(r"^Thought:\s*", "", final_text, flags=re.IGNORECASE).strip()
+                full_reply = attach_formatted_sql_card(final_text)
+
+                # Cache in Valkey for 300s (5-minute TTL)
+                try:
+                    from valkey_himes_manager import valkey_manager
+                    valkey_manager.cache_ephemeral_query(
+                        user_task,
+                        active_mrn=active_mrn,
+                        session_id=session_id,
+                        formatted_response=full_reply,
+                        executed_sql=last_sql_query or "",
+                        ttl=300
+                    )
+                except Exception as ce:
+                    print(f"[ValkeyCache] Save notice: {ce}")
+
                 return {
                     "status": "success",
-                    "reply": final_text,
+                    "reply": full_reply,
                     "actions_taken": actions_taken,
-                    "steps": step + 1
+                    "steps": step + 1,
+                    "sql_results": last_sql_results,
+                    "executed_sql": last_sql_query
                 }
 
             # Parse Action and Action Input (handles 'Action Input:' and 'ActionInput:' and inline)
@@ -819,9 +913,11 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
                     clean_reply = re.sub(r"^Thought:\s*", "", clean_reply, flags=re.IGNORECASE).strip()
                     return {
                         "status": "success",
-                        "reply": clean_reply,
+                        "reply": attach_formatted_sql_card(clean_reply),
                         "actions_taken": actions_taken,
-                        "steps": step + 1
+                        "steps": step + 1,
+                        "sql_results": last_sql_results,
+                        "executed_sql": last_sql_query
                     }
                 else:
                     history.append("System: Empty response received. Please decide your next Action or provide Final Answer.")
@@ -871,6 +967,14 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
                     if not q:
                         q = raw_input
                     obs = self.execute_select_sql(str(q or ""))
+                    try:
+                        if obs and obs.strip().startswith("["):
+                            parsed_rows = json.loads(obs)
+                            if isinstance(parsed_rows, list) and len(parsed_rows) > 0:
+                                last_sql_query = str(q or "")
+                                last_sql_results = parsed_rows
+                    except Exception:
+                        pass
                 elif action == "execute_tinker":
                     c = args.get("php_code") or args.get("code") or str(raw_input)
                     obs = self.execute_tinker(c)
@@ -904,9 +1008,11 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
         final_summary = self.call_llm(final_prompt, "You are Nagul's autonomous AI assistant.")
         return {
             "status": "success",
-            "reply": final_summary,
+            "reply": attach_formatted_sql_card(final_summary),
             "actions_taken": actions_taken,
-            "steps": max_iterations
+            "steps": max_iterations,
+            "sql_results": last_sql_results,
+            "executed_sql": last_sql_query
         }
 
 autonomous_agent = AutonomousAgent()

@@ -98,7 +98,7 @@ class AgentChatController extends Controller
 
             return response()->json([
                 'status' => 'connection_error',
-                'reply'  => '⚠️ Connection Error: Could not reach Python AI Agent at ' . $this->agentUrl . '. Please ensure uvicorn is running on port 8000.',
+                'reply'  => '⚠️ Connection Error: Could not reach Python AI Agent at ' . $this->agentUrl . '. Please ensure the Python Agent service is running on port 8050 (e.g. run start_agent.bat).',
             ], 503);
 
         } catch (\Exception $e) {
