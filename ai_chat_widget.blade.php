@@ -609,7 +609,7 @@
   // Endpoints: primary Laravel route, fallback direct FastAPI
   const LARAVEL_AI_ENDPOINT = (function() {
     const bladeUrl = "{{ url('agent/chat') }}";
-    if (bladeUrl && !bladeUrl.includes('{{')) {
+    if (bladeUrl && bladeUrl.indexOf('{' + '{') === -1) {
       return bladeUrl;
     }
     return getHimesBasePath() + "/agent/chat";
@@ -618,9 +618,9 @@
   const DIRECT_AI_ENDPOINT = "http://127.0.0.1:8050/api/chat";
 
   // Dynamic User & Role Binding
-  const CURRENT_USER_ID = "{{ $currentUserId }}";
-  const CURRENT_USERNAME = "{{ addslashes($currentUserName) }}";
-  const IS_USER_ADMIN = {{ $isAdmin ? 'true' : 'false' }};
+  const CURRENT_USER_ID = "{{ $currentUserId ?? 'guest' }}";
+  const CURRENT_USERNAME = "{{ addslashes($currentUserName ?? 'User') }}";
+  const IS_USER_ADMIN = {{ !empty($isAdmin) ? 'true' : 'false' }};
 
   // User-Isolated Session ID format: himes_user_{user_id}_{session_uuid}
   let himesSessionUuid = sessionStorage.getItem("himes_session_uuid");
