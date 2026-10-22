@@ -3,6 +3,7 @@ import os
 import re
 import json
 import datetime
+import time
 import traceback
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -120,6 +121,9 @@ class AgentResponse(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default_session"
+    user_id: Optional[str] = "guest"
+    username: Optional[str] = "User"
+    is_admin: Optional[bool] = False
     preferred_model: str = "auto"  # 'claude-3-5-sonnet', 'gpt-4o', 'gemini'
     context: dict = {}
     is_developer_mode: Optional[bool] = None
@@ -536,7 +540,7 @@ def resolve_himes_screen_entities(context: dict) -> dict:
             print(f"[ScreenResolver] Error resolving screen visit: {e}")
     return {}
 
-def update_session_memory(session_id: str, user_msg: str, agent_reply: str, entities: Optional[dict] = None):
+def update_session_memory(session_id: str, user_msg: str, agent_reply: str, entities: Optional[dict] = None, user_id: Optional[str] = None):
     sess = get_session_context(session_id)
     
     # Extract entities from user message only (prevents agent hallucinations from sticking)
@@ -554,6 +558,14 @@ def update_session_memory(session_id: str, user_msg: str, agent_reply: str, enti
         sess["turns"] = sess["turns"][-6:]
 
     save_session_memory()
+
+    # Sync to Valkey LangChain session memory (isolated per user_id & session_id)
+    try:
+        from memory.session_memory import get_session_memory
+        v_mem = get_session_memory(session_id, user_id=user_id)
+        v_mem.add_turn(user_msg, agent_reply, entities=sess.get("active_entities"))
+    except Exception as e:
+        print(f"[SessionMemory] Error syncing to Valkey: {e}")
 
 
 # ====================================================================
@@ -636,6 +648,7 @@ def format_user_mode_response(reply: str) -> str:
 # PROMPT 4: CHATBOX BACKEND CONNECTION (/api/chat) WITH CHROMADB MEMORY
 # ====================================================================
 @app.post("/api/chat", response_model=ChatResponse)
+@app.post("/agent/chat", response_model=ChatResponse)
 def chat_with_agent(payload: ChatRequest):
     """
     Endpoint for Application Chatbox UI with Dual Response System (User View vs. Developer View),
@@ -664,6 +677,21 @@ def chat_with_agent(payload: ChatRequest):
         ]
 
         if any(msg_clean == cmd or msg_clean.startswith(cmd) for cmd in dev_enable_cmds):
+            if not payload.is_admin:
+                forbidden_reply = (
+                    "⛔ **Access Denied: Admin Privilege Required**\n\n"
+                    "Developer Mode is strictly restricted to Hospital System Administrators. "
+                    "Your account does not have permission to enable technical diagnostics or raw SQL execution."
+                )
+                update_session_memory(payload.session_id, payload.message, forbidden_reply, user_id=payload.user_id)
+                return ChatResponse(
+                    status="forbidden",
+                    reply=forbidden_reply,
+                    model_used="Security Guardrail",
+                    mode="user",
+                    action_executed={"mode_switch": False, "error": "unauthorized_admin_mode"}
+                )
+
             valkey_manager.set_session_mode(payload.session_id, "developer")
             reply = (
                 "### 💻 Developer Mode Activated\n\n"
@@ -674,7 +702,7 @@ def chat_with_agent(payload: ChatRequest):
                 "• **Git Status & Traces:** Sub-branch and raw error stack traces\n\n"
                 "*(💡 Type `disable developer mode` or `user mode on` at any time to return to Clean End-User View)*"
             )
-            update_session_memory(payload.session_id, payload.message, reply)
+            update_session_memory(payload.session_id, payload.message, reply, user_id=payload.user_id)
             return ChatResponse(
                 status="success",
                 reply=reply,
@@ -693,7 +721,7 @@ def chat_with_agent(payload: ChatRequest):
                 "• Friendly Tanglish / English assistance for hospital workflows\n\n"
                 "*(💡 Type `enable developer mode` to view full technical diagnostic details)*"
             )
-            update_session_memory(payload.session_id, payload.message, reply)
+            update_session_memory(payload.session_id, payload.message, reply, user_id=payload.user_id)
             return ChatResponse(
                 status="success",
                 reply=reply,
@@ -703,11 +731,16 @@ def chat_with_agent(payload: ChatRequest):
             )
 
         # Resolve Current Mode (Valkey session persistence or explicit request override)
-        if payload.is_developer_mode is not None:
-            current_mode = "developer" if payload.is_developer_mode else "user"
-            valkey_manager.set_session_mode(payload.session_id, current_mode)
+        # Non-admin users are strictly locked to "user" mode!
+        if not payload.is_admin:
+            current_mode = "user"
+            valkey_manager.set_session_mode(payload.session_id, "user")
         else:
-            current_mode = valkey_manager.get_session_mode(payload.session_id)
+            if payload.is_developer_mode is not None:
+                current_mode = "developer" if payload.is_developer_mode else "user"
+                valkey_manager.set_session_mode(payload.session_id, current_mode)
+            else:
+                current_mode = valkey_manager.get_session_mode(payload.session_id)
         is_developer_mode = (current_mode == "developer")
 
         # Process attachments if present
@@ -731,6 +764,106 @@ def chat_with_agent(payload: ChatRequest):
                     attachment_context += f"\n[Attached media: {name} ({att_type}, {att.get('size', 0)} bytes)]"
 
         effective_message = payload.message + attachment_context
+
+        # ====================================================================
+        # ADMIN DEVELOPER MODE: RAW SQL EXECUTION ENGINE
+        # ====================================================================
+        clean_raw_candidate = payload.message.strip()
+        if clean_raw_candidate.startswith("```"):
+            clean_raw_candidate = re.sub(r"^```(?:sql)?\s*", "", clean_raw_candidate, flags=re.IGNORECASE)
+            clean_raw_candidate = re.sub(r"\s*```$", "", clean_raw_candidate).strip()
+
+        first_token_match = re.match(r"^\s*([A-Za-z]+)", clean_raw_candidate)
+        first_token = first_token_match.group(1).upper() if first_token_match else ""
+
+        is_sql_query = False
+        if first_token in ["SELECT", "WITH"]:
+            if is_developer_mode or any(k in clean_raw_candidate.upper() for k in [" FROM ", " WHERE ", " JOIN ", " AS ", "@@", "TOP ", "COUNT("]):
+                is_sql_query = True
+        elif first_token in ["UPDATE", "INSERT", "DELETE", "DROP", "TRUNCATE", "ALTER", "CREATE", "EXEC", "EXECUTE"]:
+            is_sql_query = True
+
+        if is_sql_query:
+            # 1. Non-admin users are strictly blocked
+            if not payload.is_admin:
+                forbidden_reply = (
+                    "⛔ **Access Denied: Admin Privilege Required**\n\n"
+                    "Direct SQL execution is strictly restricted to Hospital Administrators in Developer Mode. "
+                    "Non-admin users cannot execute raw database queries."
+                )
+                update_session_memory(payload.session_id, payload.message, forbidden_reply, user_id=payload.user_id)
+                return ChatResponse(
+                    status="forbidden",
+                    reply=forbidden_reply,
+                    model_used="Security Guardrail",
+                    mode="user",
+                    action_executed={"sql_blocked": True, "error": "unauthorized_raw_sql"}
+                )
+
+            # 2. Strict Read-Only Guardrail Validation (Blocks UPDATE, DELETE, DROP, etc.)
+            try:
+                validate_sql_query(clean_raw_candidate)
+            except SecurityException as se:
+                block_reply = (
+                    f"🛡️ **Security Guardrail Blocked Execution**\n\n"
+                    f"**Violation:** `{str(se)}`\n\n"
+                    f"> Strict Policy: Only read-only `SELECT` statements are permitted. Destructive operations (`UPDATE`, `DELETE`, `DROP`, `INSERT`, `ALTER`, `TRUNCATE`) are unconditionally rejected."
+                )
+                update_session_memory(payload.session_id, payload.message, block_reply, user_id=payload.user_id)
+                return ChatResponse(
+                    status="blocked_by_guardrails",
+                    reply=block_reply,
+                    model_used="Security Guardrail (Zero-Execution)",
+                    mode="developer",
+                    action_executed={"security_blocked": True, "reason": str(se)}
+                )
+
+            # 3. Live Execution on MSSQL via Docker Tinker Safe DB Driver
+            t_start = time.time()
+            sql_to_run = clean_raw_candidate
+            raw_res = autonomous_agent.execute_select_sql(sql_to_run)
+            latency_ms = round((time.time() - t_start) * 1000, 2)
+
+            parsed_rows = []
+            if raw_res and raw_res.startswith("["):
+                try:
+                    parsed_rows = json.loads(raw_res)
+                except Exception:
+                    parsed_rows = []
+
+            # 4. Zero-Token Formatter Output via utils/table_formatter.py
+            from utils.table_formatter import format_user_friendly_response
+            query_ctx = {
+                "user_query": payload.message,
+                "executed_sql": sql_to_run,
+                "latency_ms": latency_ms,
+                "mrn": sess["active_entities"].get("mrn") or "",
+                "visit_no": sess["active_entities"].get("visit_no") or ""
+            }
+
+            if isinstance(parsed_rows, list) and len(parsed_rows) > 0:
+                formatted_output = format_user_friendly_response(parsed_rows, query_context=query_ctx, mode="developer")
+            else:
+                formatted_output = (
+                    f"### 💻 Developer Diagnostics & Technical Data View\n"
+                    f"• **Record Count:** `0` rows returned | **DB Latency:** `{latency_ms} ms`\n"
+                    f"• **Executed MSSQL Query:**\n```sql\n{sql_to_run}\n```\n"
+                    f"ℹ️ *Query executed successfully on live MSSQL. Result set is empty (0 rows).* (0 Tokens)"
+                )
+
+            update_session_memory(payload.session_id, payload.message, formatted_output, user_id=payload.user_id)
+            return ChatResponse(
+                status="success",
+                reply=formatted_output,
+                model_used="Admin Live MSSQL Engine (0 Tokens)",
+                mode="developer",
+                action_executed={
+                    "raw_sql_execution": True,
+                    "sql": sql_to_run,
+                    "row_count": len(parsed_rows) if isinstance(parsed_rows, list) else 0,
+                    "latency_ms": latency_ms
+                }
+            )
 
         # Resolve screen-level entities from active URL if user is viewing a patient/billing screen
         screen_ents = resolve_himes_screen_entities(payload.context)
@@ -1168,7 +1301,14 @@ def chat_with_agent(payload: ChatRequest):
             active_ents_to_pass["visit_no"] = None  # Prevent old visit from hijacking module questions
 
         full_context["active_entities"] = active_ents_to_pass
-        full_context["previous_chat_turns"] = list(sess["turns"][-3:])
+        try:
+            from memory.session_memory import get_session_memory
+            v_mem = get_session_memory(payload.session_id, user_id=payload.user_id)
+            v_turns = v_mem.get_history()
+            full_context["previous_chat_turns"] = v_turns[-5:] if v_turns else list(sess["turns"][-5:])
+            full_context["recent_history_context"] = v_mem.format_context_for_prompt(max_turns=5)
+        except Exception:
+            full_context["previous_chat_turns"] = list(sess["turns"][-5:])
 
         # Valkey Smart Hybrid Context enrichment
         valkey_ctx = get_himes_context(payload.message, limit=2)
@@ -1201,9 +1341,12 @@ def chat_with_agent(payload: ChatRequest):
             }
         else:
             classified_intent = himes_orchestrator.classify_intent(effective_message, full_context)
-            if classified_intent == "engineering_dev":
+            if classified_intent == "engineering_dev" and payload.is_admin:
                 current_mode = "developer"
                 is_developer_mode = True
+            elif not payload.is_admin:
+                current_mode = "user"
+                is_developer_mode = False
 
             agent_res = himes_orchestrator.dispatch(effective_message, full_context, is_dev_mode=is_developer_mode)
         reply_text = agent_res.get("reply", "No response generated.")
@@ -1226,7 +1369,7 @@ def chat_with_agent(payload: ChatRequest):
                 reply_text += tech_details
 
         # Update session memory
-        update_session_memory(payload.session_id, payload.message, reply_text)
+        update_session_memory(payload.session_id, payload.message, reply_text, user_id=payload.user_id)
         valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
 
         # 4. Save into ChromaDB Semantic Cache (STRICTLY PROHIBITED for patient/visit data)

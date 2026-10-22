@@ -35,21 +35,79 @@ SESSION_TTL = 3600
 WINDOW_K = 5
 
 
+class ConversationBufferWindowMemory:
+    """
+    LangChain-compatible ConversationBufferWindowMemory.
+    Wraps ValkeySessionMemory to provide standard LangChain memory interface:
+      - load_memory_variables()
+      - save_context()
+      - clear()
+      - buffer / chat_memory
+    """
+
+    def __init__(
+        self,
+        chat_memory: Optional[BaseChatMessageHistory] = None,
+        k: int = WINDOW_K,
+        return_messages: bool = True,
+        memory_key: str = "chat_history"
+    ):
+        self.chat_memory = chat_memory
+        self.k = k
+        self.return_messages = return_messages
+        self.memory_key = memory_key
+
+    @property
+    def buffer(self):
+        if not self.chat_memory:
+            return [] if self.return_messages else ""
+        msgs = self.chat_memory.messages
+        windowed = msgs[-(self.k * 2):] if len(msgs) > (self.k * 2) else msgs
+        if self.return_messages:
+            return windowed
+        return "\n".join([f"{type(m).__name__}: {m.content}" for m in windowed])
+
+    def load_memory_variables(self, inputs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return {self.memory_key: self.buffer}
+
+    def save_context(self, inputs: Dict[str, Any], outputs: Dict[str, str]) -> None:
+        input_str = next(iter(inputs.values())) if inputs else ""
+        output_str = next(iter(outputs.values())) if outputs else ""
+        if self.chat_memory:
+            self.chat_memory.add_user_message(str(input_str))
+            self.chat_memory.add_ai_message(str(output_str))
+
+    def clear(self) -> None:
+        if self.chat_memory:
+            self.chat_memory.clear()
+
+
 class ValkeySessionMemory(BaseChatMessageHistory):
     """
     LangChain BaseChatMessageHistory implementation backed by Valkey.
 
     Wraps valkey_manager so that LangChain chains and agents get persistent,
     windowed conversation history without extra network connections.
+    Enforces user-isolated storage keys: himes:chat_history:{user_id}:{session_id}.
     """
 
-    def __init__(self, session_id: str, window_k: int = WINDOW_K):
+    def __init__(self, session_id: str, user_id: Optional[str] = None, window_k: int = WINDOW_K):
         super().__init__()
         from valkey_himes_manager import valkey_manager
         self._vm = valkey_manager
         self.session_id = session_id
         self.window_k = window_k
-        self._memory_key = f"himes:session_mem:{session_id}"
+
+        # Extract user_id from parameter or parse from session_id (himes_user_{user_id}_{uuid})
+        if not user_id:
+            m = re.match(r"^himes_user_([a-zA-Z0-9_\-]+?)_", session_id)
+            if m:
+                user_id = m.group(1)
+            else:
+                user_id = "default_user"
+        self.user_id = str(user_id)
+        # Task Specification Requirement: himes:chat_history:{user_id}:{session_id}
+        self._memory_key = f"himes:chat_history:{self.user_id}:{session_id}"
 
     # ── Internal store / load ────────────────────────────────────────────────
 
@@ -149,12 +207,17 @@ class ValkeySessionMemory(BaseChatMessageHistory):
     def add_ai_message(self, message: str) -> None:
         self.add_message(AIMessage(content=message))
 
-    def add_turn(self, user_message: str, ai_response: str) -> None:
+    def add_turn(self, user_message: str, ai_response: str, entities: Optional[Dict[str, Any]] = None) -> None:
         """
         Appends a complete human↔AI turn to the session window.
         Extracts and carries forward active entities (MRN, visit_no).
         """
         data = self._load_raw()
+
+        if entities and isinstance(entities, dict):
+            for k, v in entities.items():
+                if v:
+                    data["active_entities"][k] = v
 
         ents = self._extract_entities(user_message)
         for k, v in ents.items():
@@ -189,20 +252,44 @@ class ValkeySessionMemory(BaseChatMessageHistory):
                 messages.append(AIMessage(content=a))
         return messages
 
-    def format_context_for_prompt(self) -> str:
+    def format_context_for_prompt(self, max_turns: int = WINDOW_K) -> str:
         """
-        Returns a compact text block of recent conversation history
+        Returns a compact text block of recent conversation history (last 5 turns)
         suitable for injecting into an LLM system prompt.
         """
         turns = self.get_history()
         if not turns:
             return ""
-        lines = ["### Recent Conversation History:"]
-        for i, t in enumerate(turns, 1):
+        recent = turns[-max_turns:]
+        lines = ["### Recent Conversation History (Last 5 Turns):"]
+        for i, t in enumerate(recent, 1):
             lines.append(f"Turn {i}:")
             lines.append(f"  User: {t.get('user', '')}")
-            lines.append(f"  Agent: {t.get('ai', '')[:200]}...")
+            lines.append(f"  Agent: {t.get('ai', '')[:250]}...")
         return "\n".join(lines)
+
+
+
+    def get_langchain_window_memory(self):
+        """
+        Returns a LangChain ConversationBufferWindowMemory instance
+        synchronized with this Valkey chat message history.
+        """
+        try:
+            from langchain.memory import ConversationBufferWindowMemory as LCWindowMemory
+            return LCWindowMemory(
+                chat_memory=self,
+                k=self.window_k,
+                return_messages=True,
+                memory_key="chat_history"
+            )
+        except Exception:
+            return ConversationBufferWindowMemory(
+                chat_memory=self,
+                k=self.window_k,
+                return_messages=True,
+                memory_key="chat_history"
+            )
 
     def clear(self) -> None:
         """Clears the session memory from Valkey."""
@@ -217,12 +304,19 @@ class ValkeySessionMemory(BaseChatMessageHistory):
 
 # ── Factory ──────────────────────────────────────────────────────────────────
 
-def get_session_memory(session_id: str) -> ValkeySessionMemory:
+def get_session_memory(session_id: str, user_id: Optional[str] = None) -> ValkeySessionMemory:
     """
     Factory — returns a ValkeySessionMemory instance for the given session.
-    Each session_id maps to an isolated Valkey key.
+    Each session_id and user_id maps to an isolated Valkey key:
+    himes:chat_history:{user_id}:{session_id}
     """
-    return ValkeySessionMemory(session_id=session_id)
+    return ValkeySessionMemory(session_id=session_id, user_id=user_id)
 
 
-__all__ = ["ValkeySessionMemory", "get_session_memory"]
+__all__ = [
+    "ValkeySessionMemory",
+    "ConversationBufferWindowMemory",
+    "get_session_memory",
+    "SESSION_TTL",
+    "WINDOW_K"
+]

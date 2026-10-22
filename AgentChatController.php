@@ -29,6 +29,19 @@ class AgentChatController extends Controller
      */
     public function sendMessage(Request $request)
     {
+        // 0. Enforce Authentication Guard
+        if (!auth()->check()) {
+            return response()->json([
+                'status' => 'unauthorized',
+                'reply'  => '🔒 Authentication required: Please log in to your HIMES account to use the AI Assistant.'
+            ], 401);
+        }
+
+        $user = auth()->user();
+        $userId = (string) (auth()->id() ?? 'guest');
+        $userName = $user->name ?? $user->username ?? $user->User_Name ?? 'User';
+        $isAdmin = (bool) ($user->is_admin ?? ($user->role === 'admin') ?? ($user->user_type === 'admin') ?? false);
+
         // 1. Validate request payload
         $validated = $request->validate([
             'message'           => 'required|string|max:10000',
@@ -40,14 +53,31 @@ class AgentChatController extends Controller
         ]);
 
         $userMessage = trim($validated['message']);
-        $sessionId   = $validated['session_id'] ?? session()->getId() ?? 'default_session';
-        $model       = $validated['preferred_model'] ?? 'auto';
+        
+        // Dynamic User-Isolated Session ID: himes_user_{user_id}_{session_uuid}
+        $sessionId = $validated['session_id'] ?? null;
+        if (!$sessionId || !str_starts_with($sessionId, 'himes_user_')) {
+            $sessionUuid = session()->get('himes_ai_session_uuid');
+            if (!$sessionUuid) {
+                $sessionUuid = \Illuminate\Support\Str::uuid()->toString();
+                session()->put('himes_ai_session_uuid', $sessionUuid);
+            }
+            $sessionId = "himes_user_{$userId}_{$sessionUuid}";
+        }
 
-        // Additional context (e.g., authenticated user, app information)
+        $model = $validated['preferred_model'] ?? 'auto';
+
+        // Enforce Developer Mode only for Admin users
+        $isDevMode = $isAdmin ? (bool) ($validated['is_developer_mode'] ?? false) : false;
+
+        // Additional context (e.g., authenticated user, admin status, app information)
         $context = array_merge([
-            'user_id' => auth()->id() ?? 'guest',
-            'app'     => 'himes',
-            'ip'      => $request->ip(),
+            'user_id'   => $userId,
+            'username'  => $userName,
+            'is_admin'  => $isAdmin,
+            'app'       => 'himes-ai',
+            'path'      => '/L9/nagul/himes-ai',
+            'ip'        => $request->ip(),
         ], $validated['context'] ?? []);
 
         try {
@@ -60,9 +90,12 @@ class AgentChatController extends Controller
                 ->post($this->agentUrl, [
                     'message'           => $userMessage,
                     'session_id'        => $sessionId,
+                    'user_id'           => $userId,
+                    'username'          => $userName,
+                    'is_admin'          => $isAdmin,
                     'preferred_model'   => $model,
                     'context'           => $context,
-                    'is_developer_mode' => $validated['is_developer_mode'] ?? null,
+                    'is_developer_mode' => $isDevMode,
                     'attachments'       => $validated['attachments'] ?? [],
                 ]);
 

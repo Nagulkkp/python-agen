@@ -1,4 +1,12 @@
 <!-- HIMES AI Dev Assistant Floating Chat Widget with Full-Screen Modal, Multi-Media Attachments & Dual Mode System -->
+@auth
+@if(!request()->is('login') && !request()->is('*/login'))
+@php
+    $currentUser = Auth::user();
+    $currentUserId = (string) (Auth::id() ?? 'guest');
+    $currentUserName = $currentUser->name ?? $currentUser->username ?? $currentUser->User_Name ?? 'User';
+    $isAdmin = (bool) ($currentUser->is_admin ?? ($currentUser->role === 'admin') ?? ($currentUser->user_type === 'admin') ?? false);
+@endphp
 <style>
   #himes-ai-widget {
     position: fixed;
@@ -504,11 +512,13 @@
         </div>
       </div>
       <div class="himes-ai-header-controls">
-        <!-- Dual Mode Badge Toggle (Hidden per user preference) -->
-        <div id="himes-ai-mode-badge" class="himes-ai-mode-badge user-mode" style="display:none;" onclick="toggleModeClick()">
+        @if($isAdmin)
+        <!-- Dual Mode Badge Toggle (Admin Only) -->
+        <div id="himes-ai-mode-badge" class="himes-ai-mode-badge user-mode" onclick="toggleModeClick()" title="Click to toggle User View / Developer View">
           <span id="himes-mode-icon">👤</span>
-          <span id="himes-mode-text">Assistant</span>
+          <span id="himes-mode-text">User View</span>
         </div>
+        @endif
         <!-- Maximize / Popup Modal Button -->
         <button id="himes-ai-max-btn" class="himes-ai-icon-btn" onclick="toggleHimesMaximize()" title="Expand to Full Popup Modal">
           <svg id="himes-max-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
@@ -535,7 +545,7 @@
     <!-- Chat Messages -->
     <div class="himes-ai-messages" id="himes-ai-msg-list">
       <div class="himes-ai-msg agent">
-        👋 <strong>Hi, Nagul!</strong><br>
+        👋 <strong>Hi, {{ $currentUserName }}!</strong><br>
         How can I help you today?
       </div>
     </div>
@@ -600,6 +610,19 @@
 
   const DIRECT_AI_ENDPOINT = "http://127.0.0.1:8050/api/chat";
 
+  // Dynamic User & Role Binding
+  const CURRENT_USER_ID = "{{ $currentUserId }}";
+  const CURRENT_USERNAME = "{{ addslashes($currentUserName) }}";
+  const IS_USER_ADMIN = {{ $isAdmin ? 'true' : 'false' }};
+
+  // User-Isolated Session ID format: himes_user_{user_id}_{session_uuid}
+  let himesSessionUuid = sessionStorage.getItem("himes_session_uuid");
+  if (!himesSessionUuid) {
+    himesSessionUuid = Math.random().toString(36).substring(2, 10);
+    sessionStorage.setItem("himes_session_uuid", himesSessionUuid);
+  }
+  const USER_SESSION_ID = "himes_user_" + CURRENT_USER_ID + "_" + himesSessionUuid;
+
   // State Management
   let isDeveloperMode = false; // Default User Mode
   let pendingAttachments = [];
@@ -659,6 +682,10 @@
   }
 
   function toggleModeClick() {
+    if (!IS_USER_ADMIN) {
+      alert("Developer Mode is restricted to Administrator accounts only.");
+      return;
+    }
     const nextMode = !isDeveloperMode;
     const cmd = nextMode ? "enable developer mode" : "disable developer mode";
     document.getElementById("himes-ai-input").value = cmd;
@@ -892,14 +919,19 @@
 
     const payload = JSON.stringify({
       message: task || "Please inspect the attached files.",
-      session_id: "himes_chat_session",
+      session_id: USER_SESSION_ID,
+      user_id: String(CURRENT_USER_ID),
+      username: CURRENT_USERNAME,
+      is_admin: IS_USER_ADMIN,
       preferred_model: "auto",
-      is_developer_mode: isDeveloperMode,
+      is_developer_mode: IS_USER_ADMIN ? isDeveloperMode : false,
       attachments: attachmentsToSend,
       context: {
         app: "himes-ai",
         path: "/L9/nagul/himes-ai",
-        user: "nagul",
+        user: CURRENT_USERNAME,
+        user_id: CURRENT_USER_ID,
+        is_admin: IS_USER_ADMIN,
         current_url: window.location.href,
         current_path: window.location.pathname,
         page_title: pageTitle,
@@ -967,3 +999,5 @@
     }
   }
 </script>
+@endif
+@endauth

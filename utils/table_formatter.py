@@ -505,7 +505,8 @@ def format_user_friendly_response(
     if mode == "developer":
         dev_lines = []
         dev_lines.append(f"### 💻 Developer Diagnostics & Technical Data View")
-        dev_lines.append(f"• **Record Count:** `{total_count}` rows | **Unbilled:** `{unbilled_count}` | **Billed:** `{billed_count}`")
+        latency_str = f" | **DB Latency:** `{context['latency_ms']} ms`" if context.get("latency_ms") is not None else ""
+        dev_lines.append(f"• **Record Count:** `{total_count}` rows | **Unbilled:** `{unbilled_count}` | **Billed:** `{billed_count}`{latency_str}")
         if mrn or visit_no:
             dev_lines.append(f"• **Context Keys:** MRN: `{mrn or 'N/A'}` | Visit: `{visit_no or 'N/A'}`")
         if executed_sql:
