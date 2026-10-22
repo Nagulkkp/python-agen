@@ -1113,6 +1113,168 @@ def chat_with_agent(payload: ChatRequest):
                     action_executed={"mrn": active_mrn, "visit_no": active_visit, "services_count": len(srv_list), "cached_valkey_5m": True}
                 )
 
+        # ====================================================================
+        # TIER 1.5: SCHEMATIC FUNCTIONALITY-TO-QUERY ENGINE (0 TOKENS, LIVE MSSQL)
+        # ====================================================================
+        is_unbilled_intent = any(w in msg_lower for w in ["unbilled", "un-billed", "pending", "bill aagadha", "podadha", "not billed", "bill illatha", "பில் ஆகாத", "போடாத", "நிலுவை"]) or ("غير" in msg_lower and "مفوتر" in msg_lower)
+        is_lab_intent = any(w in msg_lower for w in ["lab", "laboratory", "blood test", "பரிசோதனை", "லேப்", "فحوصات", "تحاليل", "लैब"])
+        is_pharmacy_intent = any(w in msg_lower for w in ["pharmacy", "drug", "prescription", "medicine", "marunthu", "மருந்து", "பார்மசி", "أدوية", "صيدلية", "दवा"])
+        is_services_intent = any(w in msg_lower for w in ["service", "services", "orders", "சேவை", "சேவைகள்", "خدمات"])
+        is_recent_visits_intent = any(w in msg_lower for w in ["recent patient visits", "recent visits", "latest visits", "today visits", "active visits", "visits list", "சமீபத்திய வருகைகள்", "patient visits list", "விசிட் லிஸ்ட்"])
+
+        functionality_sql = None
+        functionality_title = ""
+
+        if is_unbilled_intent and is_lab_intent:
+            functionality_title = "Unbilled Laboratory Services"
+            functionality_sql = """
+            SELECT TOP 50
+                pvbd.Permanent_Visit_No,
+                pbd.Permanent_MRN_No,
+                s.Service_Description,
+                s.CPT_Code,
+                pvs.Service_Quantity,
+                pvs.Service_Gross_Amount,
+                pvs.Service_Net_Amount,
+                pvs.Is_Service_Billed,
+                pvs.Patient_Payment_Type_Code
+            FROM Patient_Visit_Services pvs WITH(NOLOCK)
+            JOIN Patient_Visit_Basic_Details pvbd WITH(NOLOCK) ON pvs.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No
+            JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
+            JOIN Service_USSDB sussdb WITH(NOLOCK) ON sussdb.Service_USSDB_Serial_No = pvs.Service_USSDB_Serial_No
+            JOIN Service s WITH(NOLOCK) ON s.Service_Serial_No = sussdb.Service_Serial_No
+            WHERE pvs.Active_Status = 'A'
+              AND pvs.Patient_Visit_Service_Cancellation_Flag = 'N'
+              AND pvs.Is_Service_Billed = 'N'
+              AND (s.Service_Description LIKE '%LAB%' OR s.Service_Description LIKE '%TEST%' OR s.Service_Description LIKE '%BLOOD%' OR s.Service_Description LIKE '%PROFILE%' OR s.Service_Description LIKE '%CBC%' OR s.Service_Description LIKE '%PANEL%')
+            ORDER BY pvs.Patient_Visit_Services_Serial_No DESC
+            """
+        elif is_unbilled_intent and is_pharmacy_intent:
+            functionality_title = "Unbilled Pharmacy & Medications"
+            functionality_sql = """
+            SELECT TOP 50
+                pvbd.Permanent_Visit_No,
+                pbd.Permanent_MRN_No,
+                s.Service_Description,
+                s.CPT_Code,
+                pvs.Service_Quantity,
+                pvs.Service_Gross_Amount,
+                pvs.Service_Net_Amount,
+                pvs.Is_Service_Billed,
+                pvs.Patient_Payment_Type_Code
+            FROM Patient_Visit_Services pvs WITH(NOLOCK)
+            JOIN Patient_Visit_Basic_Details pvbd WITH(NOLOCK) ON pvs.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No
+            JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
+            JOIN Service_USSDB sussdb WITH(NOLOCK) ON sussdb.Service_USSDB_Serial_No = pvs.Service_USSDB_Serial_No
+            JOIN Service s WITH(NOLOCK) ON s.Service_Serial_No = sussdb.Service_Serial_No
+            WHERE pvs.Active_Status = 'A'
+              AND pvs.Patient_Visit_Service_Cancellation_Flag = 'N'
+              AND pvs.Is_Service_Billed = 'N'
+              AND (s.Service_Description LIKE '%PHARM%' OR s.Service_Description LIKE '%DRUG%' OR s.Service_Description LIKE '%TAB%' OR s.Service_Description LIKE '%SYR%' OR s.Service_Description LIKE '%CAP%' OR s.Service_Description LIKE '%INJ%')
+            ORDER BY pvs.Patient_Visit_Services_Serial_No DESC
+            """
+        elif is_unbilled_intent and (is_services_intent or "unbilled" in msg_lower):
+            functionality_title = "Hospital Unbilled Services"
+            functionality_sql = """
+            SELECT TOP 50
+                pvbd.Permanent_Visit_No,
+                pbd.Permanent_MRN_No,
+                s.Service_Description,
+                s.CPT_Code,
+                pvs.Service_Quantity,
+                pvs.Service_Gross_Amount,
+                pvs.Service_Net_Amount,
+                pvs.Is_Service_Billed,
+                pvs.Patient_Payment_Type_Code
+            FROM Patient_Visit_Services pvs WITH(NOLOCK)
+            JOIN Patient_Visit_Basic_Details pvbd WITH(NOLOCK) ON pvs.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No
+            JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
+            JOIN Service_USSDB sussdb WITH(NOLOCK) ON sussdb.Service_USSDB_Serial_No = pvs.Service_USSDB_Serial_No
+            JOIN Service s WITH(NOLOCK) ON s.Service_Serial_No = sussdb.Service_Serial_No
+            WHERE pvs.Active_Status = 'A'
+              AND pvs.Patient_Visit_Service_Cancellation_Flag = 'N'
+              AND pvs.Is_Service_Billed = 'N'
+            ORDER BY pvs.Patient_Visit_Services_Serial_No DESC
+            """
+        elif not is_unbilled_intent and any(w in msg_lower for w in ["pending lab results", "pending lab", "lab results pending", "lab result varatha"]):
+            functionality_title = "Pending Laboratory Orders & Results"
+            functionality_sql = """
+            SELECT TOP 50
+                pvbd.Permanent_Visit_No,
+                pbd.Permanent_MRN_No,
+                s.Service_Description,
+                loi.Result_Value,
+                loi.Reference_Range,
+                loi.Active_Status AS Test_Status
+            FROM Patient_Visit_Lab_Order lo WITH(NOLOCK)
+            JOIN Lab_Order_Item_Result loi WITH(NOLOCK) ON lo.Patient_Visit_Lab_Order_Serial_No = loi.Patient_Visit_Lab_Order_Serial_No
+            JOIN Patient_Visit_Basic_Details pvbd WITH(NOLOCK) ON lo.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No
+            JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
+            JOIN Service s WITH(NOLOCK) ON loi.Service_Serial_No = s.Service_Serial_No
+            WHERE lo.Active_Status = 'A'
+              AND (loi.Result_Value IS NULL OR loi.Result_Value = '' OR loi.Active_Status != 'A')
+            ORDER BY lo.Patient_Visit_Lab_Order_Serial_No DESC
+            """
+        elif is_recent_visits_intent:
+            functionality_title = "Recent Patient Visits"
+            functionality_sql = """
+            SELECT TOP 25
+                pvbd.Permanent_Visit_No,
+                pbd.Permanent_MRN_No,
+                CONCAT(ppd.Patient_First_Name, ' ', ppd.Patient_Last_Name) AS Patient_Name,
+                pvbd.Visit_Type_Code,
+                pvbd.Created_Date_Time AS Visit_Date,
+                pvbd.Active_Status
+            FROM Patient_Visit_Basic_Details pvbd WITH(NOLOCK)
+            JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
+            LEFT JOIN Patient_Personal_Details ppd WITH(NOLOCK) ON pbd.Patient_Master_Serial_No = ppd.Patient_Master_Serial_No
+            WHERE pvbd.Active_Status = 'A'
+            ORDER BY pvbd.Patient_Visit_Basic_Details_Serial_No DESC
+            """
+
+        if functionality_sql and not active_mrn:
+            t0 = time.time()
+            raw_func_res = autonomous_agent.execute_select_sql(functionality_sql.strip())
+            func_latency = round((time.time() - t0) * 1000, 2)
+            parsed_func = json.loads(raw_func_res) if raw_func_res and raw_func_res.startswith("[") else []
+
+            from utils.table_formatter import format_user_friendly_response
+            func_reply = format_user_friendly_response(
+                parsed_func,
+                query_context={
+                    "user_query": payload.message,
+                    "executed_sql": functionality_sql.strip(),
+                    "latency_ms": func_latency,
+                    "title": functionality_title
+                },
+                mode=current_mode
+            )
+
+            # Ephemeral Cache in Valkey for 5 minutes
+            valkey_manager.cache_ephemeral_query(
+                payload.message,
+                active_mrn="",
+                session_id=payload.session_id,
+                formatted_response=func_reply,
+                executed_sql=functionality_sql.strip(),
+                ttl=300
+            )
+            update_session_memory(payload.session_id, payload.message, func_reply, user_id=payload.user_id)
+            return ChatResponse(
+                status="success",
+                reply=func_reply,
+                model_used="HIMES Schematic NL2SQL Engine (0 LLM Tokens, Live MSSQL)",
+                mode=current_mode,
+                action_executed={
+                    "functionality_nl2sql": True,
+                    "title": functionality_title,
+                    "sql": functionality_sql.strip(),
+                    "row_count": len(parsed_func),
+                    "latency_ms": func_latency,
+                    "cached_valkey_5m": True
+                }
+            )
+
         # 1. Valkey Fast-Path: Menu Navigation Lookup
         msg_lower = payload.message.lower()
         if any(p in msg_lower for p in ["price list management", "pricelist", "price list"]) and any(w in msg_lower for w in ["menu", "enga", "where", "screen", "location", "path", "open", "iruku"]):

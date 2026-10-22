@@ -545,8 +545,15 @@
     <!-- Chat Messages -->
     <div class="himes-ai-messages" id="himes-ai-msg-list">
       <div class="himes-ai-msg agent">
-        👋 <strong>Hi, {{ $currentUserName }}!</strong><br>
-        How can I help you today?
+        <div style="font-size: 14px; font-weight: 700; margin-bottom: 6px;">👋 Vanakkam {{ Auth::user()->name ?? $currentUserName }}!</div>
+        <div style="margin-bottom: 8px;">I am your HIMES Autonomous AI Developer & Assistant Agent.</div>
+        <div style="font-size: 12.5px; line-height: 1.5; color: #cbd5e1; margin-bottom: 10px;">
+          • <strong>In User View:</strong> I provide clean, plain-language hospital summaries, status cards, screen locations, and optional SQL query views.<br>
+          • <strong>In Developer View:</strong> I provide full technical diagnostics, live SELECT SQL queries, Valkey cache states, file paths, and git traces.
+        </div>
+        <div style="font-size: 11.5px; color: #94a3b8; background: rgba(255, 255, 255, 0.05); padding: 6px 10px; border-radius: 6px;">
+          💡 <strong>Tip:</strong> You can drag & drop error logs, SQL files, or images directly into this chat!
+        </div>
       </div>
     </div>
 

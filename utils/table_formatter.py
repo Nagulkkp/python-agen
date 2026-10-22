@@ -462,7 +462,15 @@ def format_user_friendly_response(
     if not query_results:
         id_str = f" (`{mrn}`)" if mrn else ""
         visit_str = f" (Visit: `{visit_no}`)" if visit_no else ""
-        return f"{loc['empty']}{id_str}{visit_str}."
+        empty_msg = f"{loc['empty']}{id_str}{visit_str}."
+        if executed_sql:
+            empty_msg += (
+                f"\n\n<details>\n"
+                f"<summary>🔍 <b>View Generated SQL Query</b></summary>\n\n"
+                f"```sql\n{executed_sql.strip()}\n```\n"
+                f"</details>"
+            )
+        return empty_msg
 
     # 2. Metric Aggregations & Department Grouping
     total_count = len(query_results)
@@ -611,7 +619,17 @@ def format_user_friendly_response(
     )
     card_sections.append(collapsible_table)
 
-    # 5. Localized Footer
+    # 5. Expandable / Collapsible Generated SQL Query View for Standard Users
+    if executed_sql:
+        sql_toggle = (
+            f"\n<details>\n"
+            f"<summary>🔍 <b>View Generated SQL Query</b></summary>\n\n"
+            f"```sql\n{executed_sql.strip()}\n```\n"
+            f"</details>"
+        )
+        card_sections.append(sql_toggle)
+
+    # 6. Localized Footer
     card_sections.append(f"\n{loc['footer']}")
 
     return "\n".join(card_sections)
