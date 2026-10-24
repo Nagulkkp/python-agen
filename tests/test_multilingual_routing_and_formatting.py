@@ -97,7 +97,14 @@ def run_tests():
         return "[]"
 
     autonomous_agent.execute_select_sql = test_mock_sql
+    try:
+        if valkey_manager._client:
+            valkey_manager._client.flushdb()
+    except Exception:
+        pass
     valkey_manager.invalidate_patient_snapshot(test_mrn)
+
+
 
     try:
         # ---------------------------------------------------------------------

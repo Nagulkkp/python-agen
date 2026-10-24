@@ -48,6 +48,17 @@ LOCALIZED_CONTENT: Dict[str, Dict[str, str]] = {
         "unbilled_tag": "⚠️ பில் ஆகவில்லை",
         "billed_tag": "✅ பில் ஆனது"
     },
+    "tanglish": {
+        "empty": "ℹ️ **Status:** Database-la matching records ethuvum kidaikala",
+        "unbilled_title": "### ⚠️ Innum Bill Aagatha Services (Pending Unbilled Services)",
+        "unbilled_desc": "> **Status:** Motha **{total}** services-la **{unbilled} services** innum bill aagala (Pending).",
+        "billed_title": "### ✅ Record Aana Services Breakdown (All Billed)",
+        "billed_desc": "> **Status:** Motha **{total}** services-um bill aagi finalize aagirukku.",
+        "summary_btn": "📌 Muzhu details table-ah paaka click pannunga ({count} items)",
+        "footer": "> ℹ️ Intha details live hospital database-la irunthu direct-ah edukapattathu (0 Tokens).",
+        "unbilled_tag": "⚠️ Bill Aagala",
+        "billed_tag": "✅ Billed"
+    },
     "hi": {
         "empty": "ℹ️ **सूचना:** अस्पताल डेटाबेस में कोई संबंधित रिकॉर्ड नहीं मिला",
         "unbilled_title": "### ⚠️ अनबिल्ड सेवाओं का विवरण (Pending Unbilled Services)",
@@ -316,10 +327,9 @@ def detect_language(text: Optional[str]) -> str:
     if any(re.search(rf"\b{w}\b", lower) for w in ["tagihan", "layanan", "pasien", "belum", "ditagih", "tampilkan"]):
         return "id"
 
-    # 18. Tagalog / Filipino
-    # Tanglish structural linguistic morphemes (dative -ku, locative -la, genitive -oda, verb stem iruk-)
-    if re.search(r"(-ku\b|-la\b|-oda\b|\biruk|\benna\b|\bkaattu\b|\bsollu\b)", lower):
-        return "ta"
+    # 18. Tanglish structural linguistic morphemes and common words
+    if re.search(r"(-ku\b|-la\b|-oda\b|\biruk|\benna\b|\bkaattu\b|\bsollu\b|\bnethu\b|\binaiku\b|\bpaaru\b|\bkodu\b|\bpanren\b|\bpannu\b|\bathanala\b|\bantha\b|\bintha\b|\byaar\b|\byaaravathu\b|\bpanniruk|\bpotruk)", lower):
+        return "tanglish"
 
     # Default for Latin / unclassified queries
     return "en"
@@ -432,6 +442,20 @@ def evaluate_panic_alerts(query_results: List[Dict[str, Any]]) -> List[Dict[str,
     return alerts
 
 
+def is_clinical_service_dataset(rows: List[Dict[str, Any]]) -> bool:
+    """Checks if the result rows actually represent clinical services or encounter orders."""
+    if not rows or not isinstance(rows[0], dict):
+        return False
+    service_cols = {
+        "cpt_code", "cpt", "service_description", "service_name", "test_name",
+        "drug_brand_name", "drug_generic_name", "item_description", "is_service_billed", 
+        "patient_visit_services_serial_no", "service_ussdb_serial_no", "analyte"
+    }
+    sample = rows[0]
+    keys_lower = {k.lower() for k in sample.keys()}
+    return bool(keys_lower.intersection(service_cols))
+
+
 def format_user_friendly_response(
     query_results: List[Dict[str, Any]], 
     query_context: Optional[Dict[str, Any]] = None, 
@@ -471,6 +495,17 @@ def format_user_friendly_response(
                 f"</details>"
             )
         return empty_msg
+
+    # 1.5 Route Non-Clinical Queries to Generic Formatter
+    # Prevents patient/doctor/visit/setting queries from falsely displaying as "Consultation & Clinical Procedures" and "Billed"
+    if not is_clinical_service_dataset(query_results):
+        latency_ms = context.get("latency_ms", 0)
+        return format_generic_query_result(
+            rows=query_results,
+            executed_sql=executed_sql,
+            latency_ms=latency_ms,
+            mode=mode
+        )
 
     # 2. Metric Aggregations & Department Grouping
     total_count = len(query_results)
@@ -606,8 +641,11 @@ def format_user_friendly_response(
         )
         dept = categorize_row(r)
         qty = r.get("Service_Quantity") or r.get("Quantity") or 1
-        unb = is_row_unbilled(r)
-        status_label = loc["unbilled_tag"] if unb else loc["billed_tag"]
+        if "Is_Service_Billed" in r or "Is_Bill_Finalized" in r:
+            unb = is_row_unbilled(r)
+            status_label = loc["unbilled_tag"] if unb else loc["billed_tag"]
+        else:
+            status_label = "📋 Active"
         table_rows.append(f"| {cpt} | {desc} | {dept} | {qty} | {status_label} |")
 
     collapsible_table = (
@@ -633,3 +671,86 @@ def format_user_friendly_response(
     card_sections.append(f"\n{loc['footer']}")
 
     return "\n".join(card_sections)
+
+
+# -----------------------------------------------------------------------------
+# GENERIC QUERY RESULT FORMATTER (for direct SELECT queries via chat input)
+# Produces clean readable markdown tables with collapsible large result sets.
+# Does NOT assume patient/billing data — works for ANY table/query result.
+# -----------------------------------------------------------------------------
+
+def format_generic_query_result(
+    rows: List[Dict[str, Any]],
+    executed_sql: str = "",
+    latency_ms: float = 0,
+    mode: str = "user",
+    display_limit: int = 20
+) -> str:
+    """
+    Format raw SQL query results into a clean, readable markdown table.
+    - Shows up to `display_limit` rows by default.
+    - If total rows > display_limit, remaining rows appear in a collapsible <details> accordion.
+    - In developer mode, also shows the executed SQL and latency.
+    """
+    if not rows:
+        result = f"ℹ️ Query returned **0 rows** (`{latency_ms} ms`)\n\n"
+        if mode == "developer" and executed_sql:
+            result += f"```sql\n{executed_sql.strip()}\n```"
+        return result
+
+    total = len(rows)
+    cols = list(rows[0].keys())
+
+    def _cell(value) -> str:
+        """Sanitize a cell value for markdown table."""
+        s = str(value) if value is not None else "—"
+        return s.replace("\n", " ").replace("\r", "").replace("|", "\\|")[:200]
+
+    def _build_md_table(data_rows: List[Dict]) -> str:
+        header = "| " + " | ".join(cols) + " |"
+        sep = "| " + " | ".join([":---"] * len(cols)) + " |"
+        lines = [header, sep]
+        for r in data_rows:
+            cells = [_cell(r.get(c)) for c in cols]
+            lines.append("| " + " | ".join(cells) + " |")
+        return "\n".join(lines)
+
+    display_rows = rows[:display_limit]
+    overflow_rows = rows[display_limit:]
+
+    # Primary visible table
+    primary_table = _build_md_table(display_rows)
+
+    # Summary line
+    if total == 1:
+        count_label = "**1 row** returned"
+    else:
+        count_label = f"**{total} rows** returned"
+
+    header_line = f"📊 {count_label} (`{latency_ms} ms`)"
+
+    parts = [header_line, "", primary_table]
+
+    # If there are overflow rows, put them in a collapsible accordion
+    if overflow_rows:
+        overflow_table = _build_md_table(overflow_rows)
+        collapsible = (
+            f"\n<details>\n"
+            f"<summary><b>📋 Show remaining {len(overflow_rows)} rows "
+            f"(rows {display_limit + 1}–{total})</b></summary>\n\n"
+            f"{overflow_table}\n\n"
+            f"</details>"
+        )
+        parts.append(collapsible)
+
+    # Developer mode: append the executed SQL
+    if mode == "developer" and executed_sql:
+        parts.append(
+            f"\n<details>\n"
+            f"<summary>🔍 <b>View Executed SQL</b></summary>\n\n"
+            f"```sql\n{executed_sql.strip()}\n```\n"
+            f"*(⚡ Live MSSQL | 0 LLM Tokens)*\n\n"
+            f"</details>"
+        )
+
+    return "\n".join(parts)

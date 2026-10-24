@@ -78,8 +78,13 @@ def deploy_to_laravel():
     )
     print(f"\n5. Syntax check for routes/web.php:\n   {routes_lint.strip()}")
 
-    # 6. Verify with php artisan route:list
-    print("\n6. Verifying route with 'php artisan route:list --name=agent.chat'...")
+    # 6. Clear Laravel View and Route caches
+    print("\n6. Clearing Laravel view and route cache...")
+    sandboxed_ssh.execute_sandboxed_command("php artisan view:clear && php artisan route:clear", working_dir=REMOTE_BASE)
+    print("   View and route caches cleared.")
+
+    # 7. Verify with php artisan route:list
+    print("\n7. Verifying route with 'php artisan route:list --name=agent.chat'...")
     route_list = sandboxed_ssh.execute_sandboxed_command(
         "php artisan route:list --name=agent.chat",
         working_dir=REMOTE_BASE

@@ -495,6 +495,34 @@ class ValkeyHimesManager:
                     "Patient Encript: Patient_Basic_Encript_Details pbed (Patient_First_Name, Patient_Last_Name, Contact_Phone_Mobile).",
                     "Encounters: Patient_Visit_Basic_Details pvbd (Permanent_Visit_No, Patient_Visit_Registered_Date_Time, Active_Status = 'A')."
                 ]
+            },
+            "registration_workflow": {
+                "description": "HIMES Patient Registration & Visit Management Architecture",
+                "rules": [
+                    "Two Engines: Simple Registration (/viewQuickRegistration - rapid walk-in/emergency desk with auto-loaded previous insurance) vs Detailed Registration (/patientRegistration - 4-tab full enterprise intake, secondary insurance, inpatient admission, documents).",
+                    "Demographics & ID: Chip reader XML parsing, duplicate Emirates ID / National ID detection (Patient_Identification_Details), mandatory field status (MV=Mandatory Visit, MB=Mandatory Both).",
+                    "Provider Roles: AD (Attending Doctor - owns EMR caseload), CD (Consulting Doctor - cross-speciality), RD (Referring Doctor - incentive tracking).",
+                    "Auto-Load Consultation Service: Resource_Service WHERE IsDefault = 'Y' injects doctor's consultation code automatically. Non-consultation visits (Visit_Is_Non_Consultation = 'Y') suppress consultation fee and route directly to LIS/RIS.",
+                    "Insurance & Copay Engine: Configured in Insurance_Plan_Department_Cover (Coinsurance %, Copay Amount, Limits, PA Threshold). Cloned into Patient_Visit_Insurance_Plan_Department_Cover at registration to freeze historical terms.",
+                    "Excluded Services: Insurance_Plan_Excluded_Prior_Approval_Services ('E') or cptckChkboxExc[] override -> 0.00 AED insurance cover, 100% patient share.",
+                    "Prior Authorization & Suppression: Flagged 'P' or exceeding PA_Limit_Value triggers pre-auth. If previous authorization reference exists, Insurance_Prior_Approval_Status = 'A' is set and resubmission is suppressed to prevent duplicate denials.",
+                    "Patient Merging: Merges duplicate MRNs (Patient_Basic_Details_Link_Merging), re-points visits, bills, and EMR records to target MRN, retires source MRN with Active_Status = 'D'.",
+                    "Service Deletion Restrictions: Cannot delete if invoiced (Is_Service_Billed = 'Y'), LIS processing started (SK/TP/RE/TA/PR), RIS study initiated, or visit checked out.",
+                    "Registration Lockouts: Visit becomes read-only if checked out (Visit_Is_Checkedout = 'Y'), patient discharged, invoice finalized, or e-claim XML batched for DHA/Waseel."
+                ]
+            },
+            "appointment_workflow": {
+                "description": "HIMES Appointment Scheduling Module (ASM) & Patient Journey Architecture",
+                "rules": [
+                    "8 Entry Points: ASM Scheduler (/appointmentScheduler), Patient Appointment (/patientAppointment), Global View (/viewGlobalAppointment), Front Desk (/quickRegistration & /regBookedAppointment), Doctor Consultation / EMR Caseload, OT Scheduler (/OTScheduler), Prior Visit Module (/viewPriorVisit), Patient Portal & Okadoc APIs.",
+                    "Master Hierarchy: Branch -> Department -> Sub-Department -> Speciality -> Resource_Parent (Doctor) -> Resource.",
+                    "Doctor Availability: Resource_Parent_Operating_Hours, Resource_Service_Operating_Hours (Time Slot e.g. 15/20/30 mins). Fallback to Branch operating hours.",
+                    "Doctor Leaves/Breaks: Resource_Non_Availability blocks slot booking during start/end interval.",
+                    "Follow-up Master: Branch_Free_Paid_Followup_Services (Paid_Free_Service_Status: F=Free, P=Paid, R=Revisit) & Branch Free_Follow_Up_Days/Visits.",
+                    "Status Lifecycle: CF (Confirmed #2BD790), PD (Pending #92BDF9), WF (Waiting List #E1C8E1), NS (No Show #EDB917), CX (Cancelled #F6DCAB), REG (Registered #948e79), REF (Reference Resource #C8EB02).",
+                    "Waiting List Promotion: Cancelling CF auto-promotes earliest WF to CF (autoCompleteController.php:2143).",
+                    "Visit Conversion: RegistrationAppointmentPostController links Patient_Appointment into Patient_Visit_Appointments and creates live Patient_Visit_Basic_Details."
+                ]
             }
         }
 
@@ -552,6 +580,10 @@ class ValkeyHimesManager:
             matched_flow = self.get_himes_flow("bed_management")
         elif any(w in normalized_query for w in ["inventory", "pharmacy", "drug", "item price", "medicine"]):
             matched_flow = self.get_himes_flow("inventory_pricing")
+        elif any(w in normalized_query for w in ["appointment", "booking", "slot", "schedule", "schedular", "doctor hours", "waiting list", "followup", "follow up"]):
+            matched_flow = self.get_himes_flow("appointment_workflow")
+        elif any(w in normalized_query for w in ["registration", "quick registration", "detailed registration", "demographics", "copay", "deductible", "pre-auth", "preauth", "patient merge", "check-in"]):
+            matched_flow = self.get_himes_flow("registration_workflow") or self.get_himes_flow("patient_registration")
         elif any(w in normalized_query for w in ["patient", "mrn", "register", "encounter", "visit"]):
             matched_flow = self.get_himes_flow("patient_registration")
 

@@ -1,1 +1,5 @@
-invalid type: string "21-10-2026 12:29:00 +04:00, \"HIMESCOMPANY1\", \"FGLMC\", \"https://dxb5.simplexworld.com/FHGDXB\", \"Sruthi\", \"/var/www/html/FHGDXB/resources/views/billing/PatientBilling/patientvisitdetails.blade.php\", 562, \"local.Warning: Trying to access array offset on value of type bool\"sources/views/billing/PatientBilling/patientvisitdetails.blade.php`\npannu with branch nameÿÿÿÿÿ
+HIMES-la appointment workflow romba simple-ah irukkum. Idhu epdi work aagum nu step-by-step solren:
+
+1. **Doctor Schedule Setup:** Modhalla, doctors-oda working hours, leaves, matrum consultation time slots (15 or 30 mins) system-la configure pannuvom.
+2. **Booking:** Front-desk staff patient-oda MRN illana name vechu search panni, doctor-oda available slot-la appointment book pannuvanga.
+ÿÿÿÿÿÿÿÿ

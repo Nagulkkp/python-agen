@@ -252,8 +252,8 @@ class AutonomousAgent:
     # ---------------------------------------------------------
     # LLM Interaction (Claude / GPT-4o / Gemini)
     # ---------------------------------------------------------
-    def call_llm(self, prompt: str, system_prompt: str) -> str:
-        """Invokes Gemini 3.5/3.8 or OpenAI or Claude with robust fallback."""
+    def call_llm(self, prompt: str, system_prompt: str, image_parts: list = None) -> str:
+        """Invokes Gemini 3.5/3.8 or OpenAI or Claude with robust fallback and vision support."""
         gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         openai_key = os.getenv("OPENAI_API_KEY")
         anthropic_key = os.getenv("ANTHROPIC_API_KEY")
@@ -293,7 +293,7 @@ class AutonomousAgent:
             except Exception:
                 pass
 
-        # 3. Google Gemini (Fast and free)
+        # 3. Google Gemini (Fast, free, and multimodal)
         if gemini_key and not gemini_key.startswith("your_"):
             import google.genai as genai
             from google.genai import types
@@ -302,10 +302,9 @@ class AutonomousAgent:
                 temperature=0.1
             )
             models_to_try = [
-                "gemini-3.8-flash",
                 "gemini-3.5-flash",
                 "gemini-3.1-flash-lite",
-                "gemini-3.7-flash",
+                "gemini-3.8-flash",
                 "gemini-flash-lite-latest",
                 "gemini-3-flash-preview"
             ]
@@ -316,7 +315,12 @@ class AutonomousAgent:
             last_ex = None
             for m in models_to_try:
                 try:
-                    full_content = f"{system_prompt}\n\nTask:\n{prompt}"
+                    text_content = f"{system_prompt}\n\nTask:\n{prompt}"
+                    if image_parts:
+                        full_content = [text_content] + image_parts
+                    else:
+                        full_content = text_content
+
                     res = client.models.generate_content(model=m, contents=full_content, config=config)
                     if res and res.candidates:
                         cand = res.candidates[0]
@@ -384,10 +388,12 @@ HIMES ARCHITECTURE & DATABASE SCHEMA GUIDANCE:
 - Project Directory: /L9/nagul/himes-ai
 - Database: Microsoft SQL Server (MSSQL).
 - HIMES Core Tables & Column Mappings:
-  * Patient Details:
+  * Patient Details & Demographics:
+    - MANDATORY RULE: Whenever patient details, visit lists, or demographics are asked or listed, ALWAYS include the MRN Number (`pbd.Permanent_MRN_No`)!
     - `Patient_Basic_Details pbd` (MRN column: `pbd.Permanent_MRN_No`, Serial: `pbd.Patient_Basic_Details_Serial_No`)
     - `Patient_Basic_Encript_Details pbed` (Names: `pbed.Patient_First_Name`, `pbed.Patient_Middle_Name`, `pbed.Patient_Last_Name`, Mobile: `pbed.Contact_Phone_Mobile`, Emirates ID: `pbed.Emirates_Id`)
     - Join on: `pbd.Patient_Basic_Details_Serial_No = pbed.Patient_Basic_Details_Serial_No`
+    - When user asks for patient lists (e.g. today's or yesterday's visits): Output columns must be: `MRN Number`, `Patient Name`, `Visit No`, `Time / Date`.
   * Patient Visits / Encounters:
     - `Patient_Visit_Basic_Details pvbd`
     - Visit Number column: `pvbd.Permanent_Visit_No` (e.g. 16923) or `pvbd.Patient_Visit_Basic_Details_Serial_No`
@@ -395,16 +401,41 @@ HIMES ARCHITECTURE & DATABASE SCHEMA GUIDANCE:
     - Visit Date: `pvbd.Patient_Visit_Registered_Date_Time`
     - Status check: `pvbd.Active_Status = 'A' AND pvbd.Visit_Cancellation_Flag = 'N'`
     - CRITICAL: NEVER rely on `pvbd.Is_Visit_Completely_Billed` to determine billing status! In HIMES, this column is often NULL or not updated.
-  * Billing & Invoices (HOW TO CHECK BILLING STATUS):
-    - ALWAYS check `Patient_Bill_Header pbh` via `pbh.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No AND pbh.Bill_Cancellation_Flag = 'N'`.
-    - If a record exists in `Patient_Bill_Header`:
-      * If `pbh.Is_Bill_Finalized = 'C'`: The visit is **Billed and Finalized**! (Bill No: `pbh.Bill_No`, Invoice No: `pbh.Permanent_Invoice_No`, Net Value: `pbh.Bill_Net_Value`).
-      * If `pbh.Is_Bill_Finalized != 'C'`: Bill created but in progress / pending finalization.
-    - If NO record exists in `Patient_Bill_Header`: The visit is Unbilled / Pending.
+  * Billing & Invoices (AUTHORITATIVE HIMES viewGlobalBilling STANDARD):
+    - RULE 1: ONLY show Billing Status when the user EXPLICITLY asks about billing status, bills, or invoices! When user asks for general patient lists, today's visits, or non-billing info, DO NOT attach billing status or service breakdown!
+    - RULE 2: Exact HIMES Billing Status Values from `GlobalViewBillingController.php` (`viewGlobalBilling`):
+      * If `pbh.Bill_Cancellation_Flag = 'Y'` -> Status is **`Cancelled`**
+      * If `pbh.Is_Bill_Finalized = 'C'` -> Status is **`Closed`** (Invoice is finalized & closed!)
+      * If `pbh.Is_Bill_Finalized = 'Y'` -> Status is **`Finalised`**
+      * If `pbh.Permanent_Invoice_No IS NOT NULL` and `Is_Bill_Finalized != 'C'` -> Status is **`Billed`** (Invoice generated!)
+      * If NO record exists in `Patient_Bill_Header` (or services are unbilled) -> Status is **`Pending`**
+    - Global Billing Status Query (Matching HIMES `viewGlobalBilling` Grid exactly):
+      ```sql
+      SELECT 
+          pvbd.Permanent_Visit_No,
+          pbd.Permanent_MRN_No,
+          pbed.Patient_First_Name,
+          pbed.Patient_Last_Name,
+          pbh.Permanent_Invoice_No,
+          CASE 
+              WHEN pbh.Bill_Cancellation_Flag = 'Y' THEN 'Cancelled'
+              WHEN pbh.Is_Bill_Finalized = 'C' THEN 'Closed'
+              WHEN pbh.Is_Bill_Finalized = 'Y' THEN 'Finalised'
+              WHEN pbh.Permanent_Invoice_No IS NOT NULL THEN 'Billed'
+              ELSE 'Pending'
+          END AS Billing_Status
+      FROM Patient_Visit_Basic_Details pvbd WITH(NOLOCK)
+      JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
+      JOIN Patient_Basic_Encript_Details pbed WITH(NOLOCK) ON pbd.Patient_Basic_Details_Serial_No = pbed.Patient_Basic_Details_Serial_No
+      LEFT JOIN Patient_Bill_Header pbh WITH(NOLOCK) ON pbh.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No AND pbh.Bill_Cancellation_Flag = 'N'
+      WHERE CAST(pvbd.Patient_Visit_Registered_Date_Time AS DATE) = CAST(GETDATE() AS DATE)
+        AND pvbd.Active_Status = 'A' AND pvbd.Visit_Cancellation_Flag = 'N'
+      ORDER BY pvbd.Permanent_Visit_No
+      ```
   * Patient Visit History (e.g. "last 10 visit details" for an MRN):
     - Query `Patient_Visit_Basic_Details pvbd` joining `Patient_Bill_Header pbh` ordered by `pvbd.Patient_Visit_Registered_Date_Time DESC`.
     - If the user asks for "last 10 visit details" but patient only has 1 or fewer visits registered in total, explicitly state: "MRN <MRN>-ku motham 1 visit mattum thaan iruku" (or count found) and display the details.
-    - For each visit, clearly show: Visit No, Visit Date, and Billing Status (e.g. Finalized with Bill No and Net Value).
+    - For each visit, clearly show: Visit No, Visit Date, and Billing Status.
   * Deposits & Receipts (Payment Details in HIMES UI editPatientBilling):
     - Deposits: `Patient_Visit_Deposits pvd` (linked via `pvd.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No`, columns: `pvd.Deposit_Amount_Collected`, `pvd.Bill_Amount_Adjusted_Against_Deposit`, `pvd.Balance_Deposit_Amount`). If no records or amounts are 0, tell user deposit ethuvum illa (No records found).
     - Payments Received / Receipt Grid:
@@ -548,6 +579,21 @@ HIMES ARCHITECTURE & DATABASE SCHEMA GUIDANCE:
           AND CAST(rrfi.Resource_Rate_For_Insurance_Start_Date AS DATE) <= CAST(GETDATE() AS DATE)
         ORDER BY rrfi.Resource_Rate_For_Insurance_Start_Date DESC
         ```
+  * Global Hospital Configuration & Installation Parameters:
+    - Table: `Installation_Parameters`
+    - Core Columns:
+      * `Insurance_Method` (e.g. 'DHA', 'HAAD', 'WASEEL') -> Health authority insurance submission method.
+      * `Insurance_Claim_URL` (e.g. 'https://dhpo.eclaimlink.ae/ValidateTransactions.asmx')
+      * `Insurance_Label_Text` (e.g. 'Ins/Corp')
+      * `Hospital_Name`, `Tax_Identification_Number`
+    - Query to check Insurance Method:
+      ```sql
+      SELECT TOP 1 Insurance_Method, Insurance_Claim_URL, Insurance_Label_Text FROM Installation_Parameters
+      ```
+  * Prior Authorization & Pre-Auth Status:
+    - Table: `prior_status`
+    - Core Columns: `Prior_Status_Code`, `Prior_Status_Name`, `Identification_Color_Code`, `Active_Status`
+    - Query: `SELECT * FROM prior_status`
 - PHARMACY PATIENTS, MRNs, BILLS & OP PHARMACY SCREEN:
   * In HIMES, Pharmacy patients can be registered separately with MRNs starting with 'PHAR' (e.g., PHAR2120, PHAR2119, PHAR2118):
     - Table: `Pharmacy_Patient_Basic_Details` (Columns: `Pharmacy_Permanent_MRN_No`, `Pharmacy_Temporary_MRN_No`, `Patient_First_Name`, `Patient_Last_Name`, `Contact_Phone_Mobile`)
@@ -640,10 +686,107 @@ HIMES ARCHITECTURE & DATABASE SCHEMA GUIDANCE:
     - `QuickBookPost` & `PharmcyQuickBookPost`: Daily at 5:00 AM posts revenue batches.
     - `JobExecutionLogs`: Tracks status of all background jobs.
 
+- APPOINTMENTS, DOCTOR SCHEDULES & TRANSACTION QUERIES (LIVE MSSQL TRANSACTION EXECUTION):
+  * CRITICAL DISTINCTION (STATIC WORKFLOW VS LIVE DATA):
+    - If the user asks about the overall concept, workflow, or SOP ("how does appointment work?", "explain ASM flow", "what are appointment status colors/codes?", "explain follow-up rules"):
+      -> Use the Valkey / ChromaDB appointment workflow skill to explain the architectural concept clearly.
+    - If the user asks for ANY TRANSACTIONAL or OPERATIONAL DATA (e.g. "Dr. John-ku inaikki appointment irukka?", "how many appointments booked today?", "check appointment status for MRN 3004383", "who is on leave today?", "today's cancelled appointments", "is slot 10:30 available?"):
+      -> NEVER return static workflow text or general explanations!
+      -> Understand the ASM workflow to identify the live tables (`Patient_Appointment`, `Resource_Parent`, `Resource_Non_Availability`, `Patient_Basic_Details`, `Patient_Basic_Encript_Details`, `Patient_Visit_Appointments`).
+      -> Formulate the exact MSSQL SELECT query using `execute_select_sql`.
+      -> Fetch live data from the database, analyze the rows, and present accurate, real-time facts to the user!
+  * Key Live Appointment Queries:
+    1. Patient Appointment Details (by MRN, Patient Name, or Visit Date):
+       ```sql
+       SELECT 
+           pa.Patient_Appointment_Serial_No,
+           pa.Patient_Appointment_Date,
+           pa.Appointment_Start_Time,
+           pa.Appointment_End_Time,
+           pa.Appointment_Status_Type_Code,
+           ast.Appointment_Status_Type_Name,
+           rp.Resource_Parent_Name as Doctor_Name,
+           pbd.Permanent_MRN_No,
+           pbed.Patient_First_Name,
+           pbed.Patient_Last_Name,
+           pva.Patient_Visit_Basic_Details_Serial_No
+       FROM Patient_Appointment pa WITH(NOLOCK)
+       LEFT JOIN Appointment_Status_Type ast WITH(NOLOCK) ON pa.Appointment_Status_Type_Code = ast.Appointment_Status_Type_Code
+       LEFT JOIN Resource_Parent rp WITH(NOLOCK) ON pa.Resource_Parent_Serial_No = rp.Resource_Parent_Serial_No
+       LEFT JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pa.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
+       LEFT JOIN Patient_Basic_Encript_Details pbed WITH(NOLOCK) ON pbd.Patient_Basic_Details_Serial_No = pbed.Patient_Basic_Details_Serial_No
+       LEFT JOIN Patient_Visit_Appointments pva WITH(NOLOCK) ON pa.Patient_Appointment_Serial_No = pva.Patient_Appointment_Serial_No
+       WHERE pa.Active_Status = 'A'
+         AND (pbd.Permanent_MRN_No = '<MRN>' OR pa.Patient_Appointment_Date = CAST(GETDATE() AS DATE))
+       ORDER BY pa.Patient_Appointment_Date DESC, pa.Appointment_Start_Time ASC
+       ```
+    2. Doctor Leaves & Non-Availability:
+       ```sql
+       SELECT 
+           rp.Resource_Parent_Name,
+           rna.Resource_Non_Availability_Start_Date_Time,
+           rna.Resource_Non_Availability_End_Date_Time,
+           rna.Reason_Code
+       FROM Resource_Non_Availability rna WITH(NOLOCK)
+       JOIN Resource_Parent rp WITH(NOLOCK) ON rna.Resource_Parent_Serial_No = rp.Resource_Parent_Serial_No
+       WHERE rna.Active_Status = 'A'
+         AND CAST(rna.Resource_Non_Availability_End_Date_Time AS DATE) >= CAST(GETDATE() AS DATE)
+       ORDER BY rna.Resource_Non_Availability_Start_Date_Time ASC
+       ```
+
+- PATIENT REGISTRATION & VISIT TRANSACTION QUERIES (LIVE MSSQL TRANSACTION EXECUTION):
+  * CRITICAL DISTINCTION (STATIC WORKFLOW VS LIVE DATA):
+    - If the user asks about the overall concept, workflow, or SOP ("how does patient registration work?", "Simple vs Detailed registration difference", "how is copay calculated?", "what are edit lockouts?"):
+      -> Use the Valkey / ChromaDB registration workflow skill to explain the concept.
+      -> In User Mode, use clean, intuitive, hospital business language without technical table names.
+      -> In Developer Mode, provide full technical schema, controllers, and routes.
+    - If the user asks for ANY TRANSACTIONAL or OPERATIONAL DATA (e.g. "how many patients registered today?", "MRN 3004383 registration details", "is patient Prakash registered yesterday?", "who registered visit 16923?"):
+      -> NEVER return static workflow text or general explanations!
+      -> Understand the registration workflow to identify the live tables (`Patient_Basic_Details`, `Patient_Basic_Encript_Details`, `Patient_Visit_Basic_Details`, `Patient_Visit_Insurance_Card_Details`, `Patient_Visit_Resources`, `Patient_Identification_Details`).
+      -> Formulate the exact MSSQL SELECT query using `execute_select_sql`.
+      -> Fetch live data from MSSQL, analyze the rows, and present accurate, real-time facts to the user!
+  * Key Live Registration Queries:
+    1. Patient Registration & Insurance Details by MRN:
+       ```sql
+       SELECT 
+           pbd.Permanent_MRN_No,
+           pbed.Patient_First_Name,
+           pbed.Patient_Last_Name,
+           pbd.Gender_Code,
+           pbd.Patient_DOB,
+           pbed.Contact_Phone_Mobile,
+           pvbd.Permanent_Visit_No,
+           pvbd.Patient_Visit_Registered_Date_Time,
+           ic.Insurance_Company_Name,
+           ip.Insurance_Plan_Name,
+           pvicd.Insurance_Card_No,
+           pvicd.Card_Expiry_Date
+       FROM Patient_Basic_Details pbd WITH(NOLOCK)
+       JOIN Patient_Basic_Encript_Details pbed WITH(NOLOCK) ON pbd.Patient_Basic_Details_Serial_No = pbed.Patient_Basic_Details_Serial_No
+       LEFT JOIN Patient_Visit_Basic_Details pvbd WITH(NOLOCK) ON pbd.Patient_Basic_Details_Serial_No = pvbd.Patient_Basic_Details_Serial_No AND pvbd.Active_Status = 'A'
+       LEFT JOIN Patient_Visit_Insurance_Card_Details pvicd WITH(NOLOCK) ON pvicd.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No
+       LEFT JOIN Insurance_Company ic WITH(NOLOCK) ON ic.Insurance_Company_Serial_No = pvicd.Insurance_Company_Serial_No
+       LEFT JOIN Insurance_Plans ip WITH(NOLOCK) ON ip.Insurance_Plans_Serial_No = pvicd.Insurance_Plan_Serial_No
+       WHERE pbd.Permanent_MRN_No = '<MRN>'
+       ORDER BY pvbd.Patient_Visit_Basic_Details_Serial_No DESC
+       ```
+    2. Today's Registrations Count & Breakdown:
+       ```sql
+       SELECT 
+           vet.Visit_Encounter_Type_Code,
+           vet.Visit_Encounter_Type_Description,
+           COUNT(*) as Total_Visits
+       FROM Patient_Visit_Basic_Details pvbd WITH(NOLOCK)
+       LEFT JOIN Visit_Encounter_Type vet WITH(NOLOCK) ON pvbd.Visit_Encounter_Type_Serial_No = vet.Visit_Encounter_Type_Serial_No
+       WHERE CAST(pvbd.Patient_Visit_Registered_Date_Time AS DATE) = CAST(GETDATE() AS DATE)
+         AND pvbd.Active_Status = 'A'
+         AND pvbd.Visit_Cancellation_Flag = 'N'
+       GROUP BY vet.Visit_Encounter_Type_Code, vet.Visit_Encounter_Type_Description
+       ```
+
 - Best Strategy for Queries:
   1. Formulate the exact SELECT query based on the core tables above.
-  2. You MUST execute the query using `execute_select_sql` to get the real live facts before giving the Final Answer!
-  3. State the factual answers (e.g. Patient Name, Bill No, Net Amount, Billed status: pannittaanga / pannala, Deposit status, UI Receipt No, Receipt Amount, Active Services, Inventory Item prices, and Bed rates) clearly in friendly Tanglish.
+  3. State the factual answers (e.g. Patient Name, Bill No, Net Amount, Billed status, Deposit status, UI Receipt No, Receipt Amount, Active Services, Inventory Item prices, and Bed rates) clearly in the USER'S EXACT LANGUAGE (English if asked in English, Tanglish if asked in Tanglish).
 
 CONVERSATION CONTINUITY & CONTEXT INHERITANCE:
 - Check ACTIVE APPLICATION SCREEN in Context!
@@ -676,12 +819,30 @@ CONVERSATION CONTINUITY & CONTEXT INHERITANCE:
         AND pvs.Patient_Visit_Service_Cancellation_Flag = 'N'
         AND pvs.Is_Service_Billed = 'N'
       ```
-- NO THOUGHT LEAKS:
-  * Do NOT prefix your Final Answer with `Thought:`. Output ONLY the clean user-facing response under `Final Answer:`.
-- IMPORTANT DISTINCTION:
-  * If the user is asking about a general HIMES Module, Screen, Menu, or Workflow (e.g., "pharmacy module ah paaru", "billing module pathi sollu", "price list menu enga iruku", "intha screen-a explain pannu", or referring to the ACTIVE APPLICATION SCREEN), do NOT force or assume a past visit_no from an old chat turn! Instead, explain the module, active screen (/viewGlobalOPPharmacy, GlobalViewIPPharmacyController, etc.), or ask what specific patient/visit on that screen they want to check.
-  * Only inherit active visit_no / mrn when the user is explicitly asking a patient or visit-level follow-up (e.g., "intha visit-oda bill", "service price", "receipt details", "deposit iruka", "unbilled services").
+- MULTI-TURN CONVERSATIONAL CONTINUITY & CO-REFERENCE RESOLUTION (CRITICAL MANDATE):
+  * Review the FULL SESSION CHAT HISTORY in Context carefully!
+  * If the user mentions patient details (Name, MRN, Visit No) in Turn 1 or earlier, and later asks follow-up questions (e.g., "matha details kudu", "avanoda bill", "service list", "unbilled details", "intha patient-oda visit") WITHOUT repeating the MRN or patient name:
+    - You MUST look back across all previous turns in the session, extract that exact patient's MRN or Visit No, and use it immediately to query the live database!
+  * If the user refers to "first ketta question" or "first question":
+    - Look back at Turn 1 to see the exact initial question asked, and execute the live database query to provide the factual answer to that exact question!
+  * NEVER ask the user to re-enter or repeat patient details that are already present in the chat history!
+- TIES & EXTREMA HANDLING MANDATE (CRITICAL RULE FOR 'HIGHEST AMOUNT', 'ATHIGAMAANA AMOUNT', 'MAX BILL'):
+  * When asked for the highest or lowest bill/invoice amount (e.g. "entha invoice athiga amount ku bill pannirukaanga", "highest amount", "lowest bill"):
+    - NEVER arbitrarily select `TOP 1` if multiple invoices/visits have the same highest amount!
+    - ALWAYS return ALL invoices that share the maximum amount using `TOP 1 WITH TIES` or `WHERE Bill_Net_Value = (SELECT MAX(Bill_Net_Value) ...)`!
+    - Example: If two invoices have 6502.00 AED (e.g. Visit 17089 [Inv 9747] & Visit 17091 [Inv 9749]), you MUST list BOTH invoices and both visits!
+- GROUP CO-REFERENCE & AMBIGUITY RESOLUTION ('ATHULA', 'ORU VISIT THAAN IRUKKA?'):
+  * When a previous turn found multiple patients or visits matching a search filter (e.g., 3 patients/visits named 'Prakash': 17082, 17083, 17087), and user asks:
+    - "athula entha invoice ku bill pannirukaanga" -> "athula" refers to ALL 3 Prakash visits found! Check all 3 visits together (`IN ('17082', '17083', '17087')`), and report each.
+    - "oru visit tha irukka?" -> Clarify both:
+      "MRN <MRN>-ku 1 visit thaan irukku, aana nethu Prakash nu total-ah 3 visits irunthathu: Visit 17082, 17083, 17087 (ivanga 3 perukum innum bill aagala, 'Pending' status-la irukaanga)."
+- PRONOUN RESOLUTION FOR "ANTHA VISIT" / "INTHA VISIT" / "THAT VISIT":
+  * When user says "antha visit", "intha visit", "that visit", look at the IMMEDIATELY PRECEDING ASSISTANT MESSAGE in the conversation!
+  * If the assistant just highlighted a specific visit (e.g. Visit 17089 for highest invoice), the follow-up query applies directly to Visit 17089!
+  * Do NOT revert to an older visit (such as 17087) from several turns ago!
+  * And NEVER treat words like "tha", "la", "ku", "details" as visit numbers!
 - If the user asks a visit-level follow-up WITHOUT repeating the number, use the active visit_no / MRN from Context immediately.
+
 
 TOOLS AVAILABLE:
 1. `search_code(query="keyword", subpath="")`
@@ -701,7 +862,7 @@ Action: <one of the tool names above>
 Action Input: <valid JSON object containing arguments for that tool>
 
 When you have completed all actions and have the live result, output:
-Final Answer: <Your clear, friendly response to Nagul in Tanglish / Tamil + English, stating factual numbers and results directly>
+Final Answer: <Your clear, factual response strictly in the USER'S EXACT LANGUAGE (English if asked in English, Tanglish if asked in Tanglish, Tamil if asked in Tamil)>
 """
 
         is_dev_mode = bool((context or {}).get("is_developer_mode", False))
@@ -715,29 +876,51 @@ DUAL RESPONSE SYSTEM MODE: 💻 DEVELOPER VIEW (FULL TECHNICAL DETAILS)
   • SQL Queries Executed (SELECT only) with table relationships
   • ChromaDB / Valkey Cache Lookup Details
 - Format all code, SQL, and logs inside Markdown code blocks with language identifiers (```sql, ```php, ```bash) to enable copy-to-clipboard functionality.
-- LANGUAGE MIRRORING RULE:
-  • If user asks in Pure Tamil (தமிழ் எழுத்துகளில்): Answer strictly in Pure Tamil (தமிழ்).
-  • If user asks in Tanglish (Romanized Tamil words like 'enga iruku', 'kaattu', 'solllu', etc.): Answer strictly in natural, helpful Tanglish.
-  • If user asks in English: Answer strictly in professional English.
+- STRICT MULTI-LINGUAL & TANGLISH LANGUAGE MIRRORING MANDATE (CRITICAL & ABSOLUTE):
+  • If user asks in Tanglish (Tamil words written in English/Latin letters, e.g. 'enga iruku', 'antha visit la enna service', 'receipt pottirukaangala', 'nethu date la', etc.):
+    -> Answer STRICTLY in natural, friendly Tanglish (Latin alphabet)!
+    -> NEVER use Pure Tamil Unicode script (தமிழ் எழுத்துகள்) when answering a Tanglish question!
+    -> NEVER switch to pure English when answering a Tanglish question!
+  • If user asks in English (e.g. 'What services were performed?', 'What is the payment mode?'):
+    -> Answer STRICTLY in professional English!
+  • If user asks in Pure Tamil (தமிழ் எழுத்துகளில்):
+    -> Answer STRICTLY in Pure Tamil script (தமிழ் எழுத்துகளில்)!
+  • If user asks in any other language (Arabic, Malayalam, Hindi, etc.):
+    -> Answer in that EXACT SAME language!
 - NEVER talk about or explain "User View" or "Developer View" to the user!
 """
         else:
             system_prompt += """
 DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
-- STRICT PROHIBITIONS:
+- STRICT PROHIBITIONS (END-USER AUDIENCE):
+  • NO raw database table names (NEVER mention tables like Patient_Appointment, Resource_Parent, Resource_Non_Availability, Patient_Visit_Basic_Details, Patient_Basic_Details, Appointment_Status_Type, etc.)!
+  • NO raw column names or primary keys (do NOT mention Patient_Appointment_Serial_No, Resource_Parent_Serial_No, etc. - refer to them in plain business terms as 'Appointment Reference', 'Visit No', 'MRN Number')!
+  • NO PHP controller names or class names (NEVER mention QuickDemoRegController, QuickRegistrationController, RegistrationTabController, or any Controller.php - refer to them as 'Patient Registration Screen', 'Quick Registration Desk', 'Front Desk', etc.)!
+  • NO backend request parameters or query strings (NEVER mention 'replicate=1', GET/POST parameters, API payloads, or database inserts)!
+  • NO background cron job names or internal script names (do NOT mention AppointmentUpdateNoShow, ReportScheduleCron, etc.)!
   • NO file paths (do NOT mention /L9/nagul/himes-ai, app/Http/Controllers/..., routes/routes.php, etc.)
   • NO raw code snippets (no PHP, JS, or shell scripts)
   • NO database query logs (do NOT output raw SELECT SQL statements)
   • NO technical error stack traces or framework internals
+  • Speak ONLY in clean, intuitive, hospital business and UI screen navigation language (e.g. Doctor Roster, Doctor Leaves & Breaks, Slot Booking, Appointment Status Tracking, Front-Desk Visit Registration, Doctor Queue Token)!
+  • When the user asks where an option or feature is located (e.g. 'replicate option enga irukum'):
+    -> Explain the visual screen navigation clearly for the hospital staff (e.g., 'Patient Registration screen-la Visit Details tab / section-la Replicate Previous Visit option irukkum; atha click panna last visit insurance, services, diagnosis auto-populate aagidum'). Do NOT explain backend controllers or parameters!
 - VISUAL LAYOUT & PRESENTATION:
   • Return responses structured with clean Markdown and status cards:
     - ✅ Green checkmark status cards for confirmed data / success (e.g. ✅ **Status:** Confirmed / Billed)
     - ⚠️ Friendly alerts for pending items or issues (e.g. ⚠️ **Status:** In Progress / Pending)
     - ℹ️ Plain-language action summaries (e.g. "We have identified the issue in the Billing section and our system has initiated an automatic resolution. Status: In Progress").
-  • LANGUAGE MIRRORING RULE:
-    - If user asks in Pure Tamil (தமிழ் எழுத்துகளில்): Answer strictly in Pure Tamil (தமிழ்).
-    - If user asks in Tanglish (Romanized Tamil words): Answer strictly in natural, friendly Tanglish.
-    - If user asks in English: Answer strictly in professional English.
+  • STRICT MULTI-LINGUAL & TANGLISH LANGUAGE MIRRORING MANDATE (CRITICAL & ABSOLUTE):
+    - If user asks in Tanglish (Tamil words written in English/Latin letters):
+      -> Answer STRICTLY in natural, friendly Tanglish (Latin alphabet)!
+      -> NEVER use Pure Tamil Unicode script (தமிழ் எழுத்துகள்) for Tanglish questions!
+      -> NEVER switch to pure English for Tanglish questions!
+    - If user asks in English:
+      -> Answer STRICTLY in professional English!
+    - If user asks in Pure Tamil (தமிழ் எழுத்துகளில்):
+      -> Answer STRICTLY in Pure Tamil script (தமிழ் எழுத்துகளில்)!
+    - If user asks in any other language (Arabic, Malayalam, Hindi, etc.):
+      -> Answer in that EXACT SAME language!
   • NEVER talk about or explain "User View" or "Developer View" to the user!
 """
 
@@ -766,12 +949,18 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
                 vk_str = json.dumps(vk, ensure_ascii=False) if isinstance(vk, (dict, list)) else str(vk)
                 context_guidance += f"\nHIMES KNOWLEDGE RETRIEVAL:\n{vk_str[:1200]}"
 
-            # 4. Recent turns
-            turns = context.get("previous_chat_turns", [])
-            if turns:
-                context_guidance += "\nRECENT CHAT HISTORY:\n"
-                for t in turns[-2:]:
-                    context_guidance += f"- User: {t.get('user')}\n  Assistant: {str(t.get('agent'))[:160]}...\n"
+            # 4. Multi-Turn Session Conversation History (Full LangChain window)
+            recent_hist = context.get("recent_history_context")
+            if recent_hist:
+                context_guidance += f"\n\n{recent_hist}\n"
+            else:
+                turns = context.get("previous_chat_turns", [])
+                if turns:
+                    context_guidance += "\n\n### FULL SESSION CHAT HISTORY (Chronological from Turn 1):\n"
+                    for i, t in enumerate(turns, 1):
+                        u_msg = t.get("user") or ""
+                        a_msg = t.get("agent") or t.get("ai") or ""
+                        context_guidance += f"Turn {i}:\n  User: {u_msg}\n  Assistant: {str(a_msg)[:1200]}\n"
 
         history = [
             f"User Request: {user_task}\n"
@@ -786,30 +975,90 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
         active_mrn = str((context or {}).get("active_entities", {}).get("mrn") or "")
         session_id = str((context or {}).get("session_id") or "default_session")
 
+        # Extract base64 image attachments if present (for Gemini Vision multimodal understanding)
+        image_parts = []
+        raw_attachments = (context or {}).get("attachments", [])
+        if raw_attachments and isinstance(raw_attachments, list):
+            import base64
+            from google.genai import types
+            for att in raw_attachments:
+                try:
+                    att_type = att.get("type", "")
+                    data_str = att.get("data", "")
+                    if "image" in att_type or att.get("name", "").lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                        if "," in data_str:
+                            data_str = data_str.split(",", 1)[-1]
+                        img_bytes = base64.b64decode(data_str)
+                        mime_type = att_type if "image" in att_type else "image/png"
+                        image_parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime_type))
+                except Exception as ie:
+                    print(f"[AutonomousAgent] Notice decoding image attachment: {ie}")
+
         # ---------------------------------------------------------------------
         # Valkey 5-Minute Ephemeral Caching Skill (SHA256 Hash Key)
         # ---------------------------------------------------------------------
-        try:
-            from valkey_himes_manager import valkey_manager
-            cached_query = valkey_manager.get_ephemeral_query(user_task, active_mrn=active_mrn, session_id=session_id)
-            if cached_query and isinstance(cached_query, dict):
-                cached_reply = cached_query.get("formatted_response") or ""
-                cached_sql = cached_query.get("executed_sql") or ""
-                if cached_reply:
-                    return {
-                        "status": "success",
-                        "reply": cached_reply,
-                        "actions_taken": [],
-                        "steps": 0,
-                        "sql_results": [],
-                        "executed_sql": cached_sql,
-                        "model_used": "Valkey Ephemeral Cache (5-min TTL, 0 Tokens)"
-                    }
-        except Exception as ve:
-            print(f"[ValkeyCache] Notice: {ve}")
+        if not image_parts:
+            try:
+                from valkey_himes_manager import valkey_manager
+                cached_query = valkey_manager.get_ephemeral_query(user_task, active_mrn=active_mrn, session_id=session_id)
+                if cached_query and isinstance(cached_query, dict):
+                    cached_reply = cached_query.get("formatted_response") or ""
+                    cached_sql = cached_query.get("executed_sql") or ""
+                    if cached_reply:
+                        return {
+                            "status": "success",
+                            "reply": cached_reply,
+                            "actions_taken": [],
+                            "steps": 0,
+                            "sql_results": [],
+                            "executed_sql": cached_sql,
+                            "model_used": "Valkey Ephemeral Cache (5-min TTL, 0 Tokens)"
+                        }
+            except Exception as ve:
+                print(f"[ValkeyCache] Notice: {ve}")
 
         def attach_formatted_sql_card(text: str) -> str:
-            if last_sql_results and isinstance(last_sql_results, list) and len(last_sql_results) >= 1:
+            if not last_sql_query:
+                return text
+
+        def _build_sql_accordion(sql_str: str) -> str:
+            clean_sql = sql_str.strip()
+            t_matches = re.findall(r'(?:FROM|JOIN)\s+([A-Za-z0-9_]+)', clean_sql, flags=re.IGNORECASE)
+            unique_t = list(dict.fromkeys(t_matches))[:5]
+            t_display = ", ".join([f"`{t}`" for t in unique_t]) if unique_t else "`Patient_Visit_Basic_Details`"
+            return (
+                f"\n\n<details>\n"
+                f"<summary>🔍 <b>View Generated SQL Query & Database Source</b></summary>\n\n"
+                f"**Live MSSQL Query Executed:**\n"
+                f"```sql\n{clean_sql}\n```\n\n"
+                f"• **Database Source:** Live HIMES Database (`192.168.20.152`)\n"
+                f"• **Tables Queried:** {t_display}\n"
+                f"*(⚡ Real-Time Live MSSQL Execution | Verified Facts)*\n"
+                f"</details>"
+            )
+
+        def attach_formatted_sql_card(text: str) -> str:
+            if not last_sql_query:
+                return text
+
+            if "View Generated SQL Query" in text or "View Executed SQL" in text:
+                return text
+
+            # Check if LLM already formatted a markdown table in its answer
+            has_table = ("| ---" in text or "| :---" in text or "|:---" in text or "|---" in text)
+
+            if has_table:
+                # LLM already rendered the records cleanly; attach informative collapsible SQL accordion
+                return f"{text}{_build_sql_accordion(last_sql_query)}"
+
+            # If the user did NOT explicitly ask for billing/services breakdown,
+            # do NOT attach a clinical services / billed overview card!
+            user_task_lower = user_task.lower()
+            is_billing_or_services_query = any(w in user_task_lower for w in [
+                "service", "cpt", "unbilled", "procedure", "lab order", "order", "சிகிச்சை", "பரிசோதனை", "நிலுவை", "billing status", "invoice"
+            ])
+
+            if is_billing_or_services_query and last_sql_results and isinstance(last_sql_results, list) and len(last_sql_results) > 0:
                 try:
                     from utils.table_formatter import format_user_friendly_response
                     active_visit = (context or {}).get("active_entities", {}).get("visit_no")
@@ -827,11 +1076,17 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
                         return f"{text}\n\n{formatted_card}"
                 except Exception as fe:
                     print(f"[TableFormatter] notice: {fe}")
+            else:
+                # For other general queries (e.g. today's visits, patient list),
+                # attach the collapsible SQL accordion with exact query and table source
+                return f"{text}{_build_sql_accordion(last_sql_query)}"
+
             return text
 
         for step in range(max_iterations):
             prompt_input = "\n\n".join(history)
-            raw_llm = self.call_llm(prompt_input, system_prompt)
+            current_images = image_parts if (step == 0 and image_parts) else None
+            raw_llm = self.call_llm(prompt_input, system_prompt, image_parts=current_images)
             llm_response = (raw_llm or "").strip()
             if not llm_response.startswith("Thought:") and not llm_response.startswith("Final Answer:") and not llm_response.startswith("Action:"):
                 llm_response = f"Thought: {llm_response}"
@@ -905,6 +1160,21 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
                     if len(input_split) > 1:
                         raw_input = input_split[-1].strip()
 
+            # Dynamic SQL Interception: If model formulated SQL in thought without Action wrapper
+            if not action:
+                sql_block = re.search(r"```sql\s*(SELECT\s+.*?)```", llm_response, re.DOTALL | re.IGNORECASE)
+                if not sql_block:
+                    sql_block = re.search(r"\b(SELECT\s+(?:TOP\s+\d+\s+)?[^\n;]+?\bFROM\s+[a-zA-Z0-9_]+[^\n;]*)", llm_response, re.DOTALL | re.IGNORECASE)
+                if sql_block:
+                    candidate_sql = sql_block.group(1).strip()
+                    if candidate_sql.upper().startswith("SELECT") and "FROM" in candidate_sql.upper():
+                        if "WITH(NOLOCK)" not in candidate_sql.upper():
+                            candidate_sql = re.sub(r'\bFROM\s+(\w+)\b(?!\s+WITH)', r'FROM \1 WITH(NOLOCK)', candidate_sql, flags=re.IGNORECASE)
+                        if "TOP " not in candidate_sql.upper():
+                            candidate_sql = re.sub(r'^SELECT\s+', 'SELECT TOP 50 ', candidate_sql, flags=re.IGNORECASE)
+                        action = "execute_select_sql"
+                        raw_input = json.dumps({"sql_query": candidate_sql})
+
             if not action:
                 if llm_response.strip():
                     clean_reply = llm_response
@@ -966,15 +1236,20 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
                         q = list(args.values())[0]
                     if not q:
                         q = raw_input
-                    obs = self.execute_select_sql(str(q or ""))
+                    sql_str = str(q or "").strip()
+                    last_sql_query = sql_str
+                    obs = self.execute_select_sql(sql_str)
                     try:
                         if obs and obs.strip().startswith("["):
                             parsed_rows = json.loads(obs)
-                            if isinstance(parsed_rows, list) and len(parsed_rows) > 0:
-                                last_sql_query = str(q or "")
+                            if isinstance(parsed_rows, list):
                                 last_sql_results = parsed_rows
+                            else:
+                                last_sql_results = []
+                        else:
+                            last_sql_results = []
                     except Exception:
-                        pass
+                        last_sql_results = []
                 elif action == "execute_tinker":
                     c = args.get("php_code") or args.get("code") or str(raw_input)
                     obs = self.execute_tinker(c)

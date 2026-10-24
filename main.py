@@ -34,7 +34,9 @@ from ssh_sandbox import sandboxed_ssh
 from git_automation import SafeGitWorkflow
 from autonomous_agent import autonomous_agent
 from multi_agent_system import himes_orchestrator
+from language_specialist_agent import language_specialist
 from memory_manager import search_knowledge_base
+
 from semantic_cache import (
     check_semantic_cache,
     save_to_semantic_cache,
@@ -482,7 +484,7 @@ def get_session_context(session_id: str) -> dict:
 
 def extract_entities_from_text(text: str) -> dict:
     entities = {}
-    v_m = re.search(r'\b(?:visit|visit\s*no|visit\s*number)[:\s#]*([A-Za-z0-9_-]{3,12})\b', text, re.IGNORECASE)
+    v_m = re.search(r'\b(?:visit|visit\s*no|visit\s*number|encounter)[:\s#]*(\d{4,8}|PHAR\d{3,8})\b', text, re.IGNORECASE)
     if v_m:
         entities["visit_no"] = v_m.group(1)
         
@@ -543,7 +545,7 @@ def resolve_himes_screen_entities(context: dict) -> dict:
 def update_session_memory(session_id: str, user_msg: str, agent_reply: str, entities: Optional[dict] = None, user_id: Optional[str] = None):
     sess = get_session_context(session_id)
     
-    # Extract entities from user message only (prevents agent hallucinations from sticking)
+    # Extract entities from user message
     ents = extract_entities_from_text(user_msg)
     if entities and isinstance(entities, dict):
         for k, v in entities.items():
@@ -553,9 +555,20 @@ def update_session_memory(session_id: str, user_msg: str, agent_reply: str, enti
         if v:
             sess["active_entities"][k] = v
 
+    # When agent reply discusses a specific visit/MRN, record it as active for multi-turn continuity
+    if agent_reply:
+        v_reply = re.search(r'\b(?:Visit|Visit\s*No|visit\s*number)[:\s*#`]*(\d{4,8})\b', agent_reply, re.IGNORECASE)
+        if v_reply:
+            sess["active_entities"]["visit_no"] = v_reply.group(1).strip()
+        m_reply = re.search(r'\b(?:MRN|Permanent_MRN_No)[:\s*#`]*([A-Za-z0-9_-]{4,15})\b', agent_reply, re.IGNORECASE)
+        if not m_reply:
+            m_reply = re.search(r'\b(PHAR\d{3,8})\b', agent_reply, re.IGNORECASE)
+        if m_reply:
+            sess["active_entities"]["mrn"] = m_reply.group(1).strip()
+
     sess["turns"].append({"user": user_msg, "agent": agent_reply})
-    if len(sess["turns"]) > 6:
-        sess["turns"] = sess["turns"][-6:]
+    if len(sess["turns"]) > 10:
+        sess["turns"] = sess["turns"][-10:]
 
     save_session_memory()
 
@@ -575,8 +588,9 @@ def format_user_mode_response(reply: str) -> str:
     """
     Sanitizes and formats AI responses for End-User View:
     1. Removes all technical file paths (/L9/nagul/..., app/Http/..., routes/..., etc.).
-    2. Strips raw code blocks (php, sql, bash, etc.) and replaces them with clean status summaries.
-    3. Hides raw database query logs and technical stack traces.
+    2. Strips raw uncollapsed code blocks and replaces them with clean status summaries.
+    3. PRESERVES interactive <details>...</details> accordions so 'View Generated SQL Query'
+       displays the authentic raw SQL query and database source when clicked.
     4. Formats status with clean Markdown status cards (✅, ⚠️, ℹ️).
     """
     if not reply or not isinstance(reply, str):
@@ -590,7 +604,16 @@ def format_user_mode_response(reply: str) -> str:
         text = text.split('Final Answer:', 1)[-1].strip()
         text = re.sub(r'^Thought:\s*', '', text, flags=re.IGNORECASE).strip()
 
-    # 1. Replace raw SQL code blocks with verified database status card
+    # Protect interactive <details>...</details> accordions (View Generated SQL Query / Tables)
+    details_stash = []
+    def stash_details(m):
+        idx = len(details_stash)
+        details_stash.append(m.group(0))
+        return f"__HIMES_ACCORDION_STASH_{idx}__"
+
+    text = re.sub(r'<details[\s\S]*?</details>', stash_details, text, flags=re.IGNORECASE)
+
+    # 1. Replace raw naked SQL code blocks (OUTSIDE of details accordions) with verified status card
     text = re.sub(
         r'```(?:sql)?[\s\S]*?(?:SELECT|FROM|WHERE|JOIN|INSERT|UPDATE)[\s\S]*?```',
         '> ✅ **Database Verification:** Verified directly with live hospital database records.',
@@ -618,7 +641,7 @@ def format_user_mode_response(reply: str) -> str:
         text
     )
 
-    # 4. Remove / mask technical file paths
+    # 4. Remove / mask technical file paths (outside of stashed details)
     text = re.sub(
         r'(?:/L9/nagul/himes-ai/|/var/www/html/himes-ai/|app/Http/Controllers/|app/|routes/|resources/views/)[a-zA-Z0-9_\-/\.]+',
         'HIMES Core System',
@@ -639,7 +662,48 @@ def format_user_mode_response(reply: str) -> str:
     text = re.sub(r'\*\*Associated SQL Tables:\*\*\s*\n`.*?`\n*', '', text)
     text = re.sub(r'\*\*Key SQL Tables:\*\*\s*\n`.*?`\n*', '', text)
 
-    # 6. Ensure clean spacing
+    # 5b. User Mode: Mask raw SQL table names, primary keys, and cron names with intuitive healthcare terms
+    table_replacements = [
+        (r'\bResource_Parent\s*\([^)]*\)', 'Doctor / Healthcare Provider'),
+        (r'`?Resource_Parent`?', 'Doctor Roster'),
+        (r'\bResource_Non_Availability\s*\([^)]*\)', 'Doctor Leaves & Breaks'),
+        (r'`?Resource_Non_Availability`?', 'Doctor Leave Schedule'),
+        (r'`?Patient_Appointment`?\s*table', 'Appointment Records'),
+        (r'`?Patient_Appointment`?', 'Appointment Schedule'),
+        (r'`?Appointment_Status_Type`?', 'Appointment Status Tracker'),
+        (r'`?Patient_Visit_Basic_Details`?\s*table', 'Patient Visit Records'),
+        (r'`?Patient_Visit_Basic_Details`?', 'Hospital Visit Records'),
+        (r'`?Patient_Basic_Details`?', 'Patient Master'),
+        (r'`?Patient_Basic_Encript_Details`?', 'Patient Demographics'),
+        (r'`?Patient_Appointment_Serial_No`?', 'Appointment Reference ID'),
+        (r'`?Patient_Visit_Basic_Details_Serial_No`?', 'Visit Reference ID'),
+        (r'`?AppointmentUpdateNoShow`?', 'Automated No-Show System'),
+        (r'`?ReportScheduleCron`?', 'Automated Reporting Service'),
+        (r'`?Patient_Visit_Appointments`?', 'Appointment-Visit Link'),
+        (r'`?AppointmentScheduler`?', 'Appointment Calendar Scheduler'),
+        (r'`?Insurance_Plan_Department_Cover`?', 'Insurance Plan Coverage Policy'),
+        (r'`?Insurance_Plan_Excluded_Prior_Approval_Services`?', 'Plan Exclusions & Prior Approvals'),
+        (r'`?Patient_Visit_Insurance_Card_Details`?', 'Visit Insurance Information'),
+        (r'`?Patient_Visit_Admission_Details`?', 'Inpatient Admission Details'),
+        (r'`?Patient_Basic_Details_Link_Merging`?', 'Patient Merge Records'),
+        (r'`?Patient_Identification_Details`?', 'Patient Identification Documents'),
+        (r'`?QuickDemoRegController(?:\.php)?`?', 'Quick Registration Service'),
+        (r'`?QuickRegistrationController(?:\.php)?`?', 'Quick Registration Service'),
+        (r'`?RegistrationTabController(?:\.php)?`?', 'Detailed Registration Service'),
+        (r'`?RegistrationController(?:\.php)?`?', 'Registration Service'),
+        (r'`?RegistrationInsuranceController(?:\.php)?`?', 'Insurance Management Service'),
+        (r'`?[A-Za-z0-9_]+Controller(?:\.php)?`?', 'HIMES System Service'),
+        (r'\breplicate=1\s*(?:nu\s*)?(?:request\s*)?(?:parameter-ah\s*)?(?:backend-ku\s*)?(?:anupum|anuppum)?', 'Replicate Visit action'),
+        (r'\breplicate=1\b', 'replicate previous visit'),
+    ]
+    for pattern, repl in table_replacements:
+        text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
+
+    # 6. Restore protected <details> accordions intact so raw SQL query is visible upon expanding
+    for idx, block in enumerate(details_stash):
+        text = text.replace(f"__HIMES_ACCORDION_STASH_{idx}__", block)
+
+    # 7. Ensure clean spacing
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
     return text
 
@@ -647,9 +711,15 @@ def format_user_mode_response(reply: str) -> str:
 # ====================================================================
 # PROMPT 4: CHATBOX BACKEND CONNECTION (/api/chat) WITH CHROMADB MEMORY
 # ====================================================================
+@app.get("/api/health")
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "service": "himes-python-agent", "valkey": bool(valkey_manager.is_connected)}
+
 @app.post("/api/chat", response_model=ChatResponse)
 @app.post("/agent/chat", response_model=ChatResponse)
 def chat_with_agent(payload: ChatRequest):
+
     """
     Endpoint for Application Chatbox UI with Dual Response System (User View vs. Developer View),
     Multi-Media Attachments, and ChromaDB/Valkey Accelerated Memory:
@@ -693,15 +763,7 @@ def chat_with_agent(payload: ChatRequest):
                 )
 
             valkey_manager.set_session_mode(payload.session_id, "developer")
-            reply = (
-                "### 💻 Developer Mode Activated\n\n"
-                "**Full technical diagnostics are now enabled for this session:**\n"
-                "• **Exact File Paths & Lines:** Visible with code snippets\n"
-                "• **Live MSSQL Queries:** Full SELECT logs and table linkages\n"
-                "• **Cache Details:** Valkey in-memory keys and ChromaDB semantic lookup data\n"
-                "• **Git Status & Traces:** Sub-branch and raw error stack traces\n\n"
-                "*(💡 Type `disable developer mode` or `user mode on` at any time to return to Clean End-User View)*"
-            )
+            reply = "💻 **Developer mode enabled**"
             update_session_memory(payload.session_id, payload.message, reply, user_id=payload.user_id)
             return ChatResponse(
                 status="success",
@@ -713,14 +775,7 @@ def chat_with_agent(payload: ChatRequest):
 
         if any(msg_clean == cmd or msg_clean.startswith(cmd) for cmd in dev_disable_cmds):
             valkey_manager.set_session_mode(payload.session_id, "user")
-            reply = (
-                "### 👤 User Mode Activated\n\n"
-                "**Clean End-User View is now active:**\n"
-                "• Technical code snippets, file paths, and SQL query logs are hidden\n"
-                "• Plain-language hospital action summaries and status cards\n"
-                "• Friendly Tanglish / English assistance for hospital workflows\n\n"
-                "*(💡 Type `enable developer mode` to view full technical diagnostic details)*"
-            )
+            reply = "👤 **User mode active**"
             update_session_memory(payload.session_id, payload.message, reply, user_id=payload.user_id)
             return ChatResponse(
                 status="success",
@@ -730,18 +785,23 @@ def chat_with_agent(payload: ChatRequest):
                 action_executed={"mode_switch": True, "mode": "user"}
             )
 
-        # Resolve Current Mode (Valkey session persistence or explicit request override)
-        # Non-admin users are strictly locked to "user" mode!
+        # Resolve Current Mode (Default is ALWAYS User Mode; Developer Mode strictly requires Admin AND explicit opt-in)
         if not payload.is_admin:
             current_mode = "user"
             valkey_manager.set_session_mode(payload.session_id, "user")
         else:
-            if payload.is_developer_mode is not None:
-                current_mode = "developer" if payload.is_developer_mode else "user"
-                valkey_manager.set_session_mode(payload.session_id, current_mode)
+            req_ctx = payload.context or {}
+            ctx_mode = req_ctx.get("mode") or req_ctx.get("active_mode")
+            if payload.is_developer_mode is True or ctx_mode == "developer":
+                current_mode = "developer"
+                valkey_manager.set_session_mode(payload.session_id, "developer")
+            elif payload.is_developer_mode is False or ctx_mode == "user":
+                current_mode = "user"
+                valkey_manager.set_session_mode(payload.session_id, "user")
             else:
                 current_mode = valkey_manager.get_session_mode(payload.session_id)
         is_developer_mode = (current_mode == "developer")
+
 
         # Process attachments if present
         attachment_context = ""
@@ -784,11 +844,11 @@ def chat_with_agent(payload: ChatRequest):
             is_sql_query = True
 
         if is_sql_query:
-            # 1. Non-admin users are strictly blocked
+            # 1. Non-admin users are strictly blocked from direct SQL
             if not payload.is_admin:
                 forbidden_reply = (
                     "⛔ **Access Denied: Admin Privilege Required**\n\n"
-                    "Direct SQL execution is strictly restricted to Hospital Administrators in Developer Mode. "
+                    "Direct SQL execution is restricted to Hospital Administrators. "
                     "Non-admin users cannot execute raw database queries."
                 )
                 update_session_memory(payload.session_id, payload.message, forbidden_reply, user_id=payload.user_id)
@@ -814,41 +874,50 @@ def chat_with_agent(payload: ChatRequest):
                     status="blocked_by_guardrails",
                     reply=block_reply,
                     model_used="Security Guardrail (Zero-Execution)",
-                    mode="developer",
+                    mode=current_mode,
                     action_executed={"security_blocked": True, "reason": str(se)}
                 )
 
-            # 3. Live Execution on MSSQL via Docker Tinker Safe DB Driver
+            # 3. Live Execution on MSSQL
             t_start = time.time()
             sql_to_run = clean_raw_candidate
             raw_res = autonomous_agent.execute_select_sql(sql_to_run)
             latency_ms = round((time.time() - t_start) * 1000, 2)
 
             parsed_rows = []
-            if raw_res and raw_res.startswith("["):
+            exec_error = None
+            if raw_res and raw_res.strip().startswith("["):
                 try:
                     parsed_rows = json.loads(raw_res)
                 except Exception:
-                    parsed_rows = []
+                    exec_error = raw_res
+            elif raw_res and not raw_res.strip().startswith("["):
+                exec_error = raw_res  # e.g., error message from DB driver
 
-            # 4. Zero-Token Formatter Output via utils/table_formatter.py
-            from utils.table_formatter import format_user_friendly_response
-            query_ctx = {
-                "user_query": payload.message,
-                "executed_sql": sql_to_run,
-                "latency_ms": latency_ms,
-                "mrn": sess["active_entities"].get("mrn") or "",
-                "visit_no": sess["active_entities"].get("visit_no") or ""
-            }
+            # 4. Format output using generic readable table formatter
+            from utils.table_formatter import format_generic_query_result
 
-            if isinstance(parsed_rows, list) and len(parsed_rows) > 0:
-                formatted_output = format_user_friendly_response(parsed_rows, query_context=query_ctx, mode="developer")
+            if exec_error:
+                formatted_output = (
+                    f"❌ **Query Error**\n\n"
+                    f"The database returned an error while executing your query:\n\n"
+                    f"```\n{str(exec_error)[:800]}\n```\n\n"
+                    f"**Tip:** Check column names and table names — MSSQL is case-sensitive for column aliases.\n"
+                    f"Try: `SELECT TOP 5 * FROM Installation_Parameters` to inspect available columns.\n\n"
+                    f"```sql\n{sql_to_run}\n```"
+                )
+            elif isinstance(parsed_rows, list) and len(parsed_rows) > 0:
+                formatted_output = format_generic_query_result(
+                    parsed_rows,
+                    executed_sql=sql_to_run,
+                    latency_ms=latency_ms,
+                    mode=current_mode
+                )
             else:
                 formatted_output = (
-                    f"### 💻 Developer Diagnostics & Technical Data View\n"
-                    f"• **Record Count:** `0` rows returned | **DB Latency:** `{latency_ms} ms`\n"
-                    f"• **Executed MSSQL Query:**\n```sql\n{sql_to_run}\n```\n"
-                    f"ℹ️ *Query executed successfully on live MSSQL. Result set is empty (0 rows).* (0 Tokens)"
+                    f"ℹ️ **Query returned 0 rows** (`{latency_ms} ms`)\n\n"
+                    f"The query executed successfully but found no matching records.\n\n"
+                    f"```sql\n{sql_to_run}\n```"
                 )
 
             update_session_memory(payload.session_id, payload.message, formatted_output, user_id=payload.user_id)
@@ -856,7 +925,7 @@ def chat_with_agent(payload: ChatRequest):
                 status="success",
                 reply=formatted_output,
                 model_used="Admin Live MSSQL Engine (0 Tokens)",
-                mode="developer",
+                mode=current_mode,
                 action_executed={
                     "raw_sql_execution": True,
                     "sql": sql_to_run,
@@ -877,11 +946,16 @@ def chat_with_agent(payload: ChatRequest):
             if screen_ents.get("patient_serial"):
                 sess["active_entities"]["patient_serial"] = screen_ents["patient_serial"]
 
+        # Multi-Agent Language Detection & Query Normalization
+        user_lang = language_specialist.detect_language(payload.message)
+        normalized_eng_query = language_specialist.normalize_to_english(payload.message, user_lang)
+
         # Pre-scan user message for any entity updates
         user_ents = extract_entities_from_text(payload.message)
         for k, v in user_ents.items():
             if v:
                 sess["active_entities"][k] = v
+
         v_m = user_ents.get("visit_no")
         m_m = user_ents.get("mrn")
         
@@ -890,9 +964,45 @@ def chat_with_agent(payload: ChatRequest):
         if m_m and not v_m:
             sess["active_entities"]["visit_no"] = None
 
+        msg_lower = payload.message.lower()
+
+        # Co-reference resolution: If user asks about 'antha visit' / 'intha visit' / 'that visit' / 'same visit',
+        # dynamically resolve from the immediately preceding assistant turn in this session
+        is_referring_to_prev_visit = any(w in msg_lower for w in ["antha visit", "intha visit", "that visit", "this visit", "same visit"])
+        if is_referring_to_prev_visit and sess.get("turns"):
+            for turn in reversed(sess["turns"]):
+                a_txt = turn.get("agent") or turn.get("ai") or ""
+                v_cand = re.search(r'\b(?:Visit|Visit\s*No|visit\s*number)[:\s*#`]*(\d{4,8})\b', a_txt, re.IGNORECASE)
+                if v_cand:
+                    sess["active_entities"]["visit_no"] = v_cand.group(1).strip()
+                    m_cand = re.search(r'\b(?:MRN|Permanent_MRN_No)[:\s*#`]*([A-Za-z0-9_-]{4,15})\b', a_txt, re.IGNORECASE)
+                    if m_cand:
+                        sess["active_entities"]["mrn"] = m_cand.group(1).strip()
+                    break
+
+        # If visit_no is active, ensure MRN is perfectly synchronized to that visit's real MRN
+        active_visit = sess["active_entities"].get("visit_no")
+        if active_visit and str(active_visit).isdigit():
+            try:
+                v_sync_sql = f"""
+                SELECT TOP 1 pbd.Permanent_MRN_No 
+                FROM Patient_Visit_Basic_Details pvbd WITH(NOLOCK) 
+                JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No 
+                WHERE pvbd.Permanent_Visit_No = '{active_visit}'
+                """
+                v_sync_raw = autonomous_agent.execute_select_sql(v_sync_sql)
+                if v_sync_raw and v_sync_raw.startswith("["):
+                    v_sync_data = json.loads(v_sync_raw)
+                    if v_sync_data and len(v_sync_data) > 0:
+                        matched_mrn = str(v_sync_data[0].get("Permanent_MRN_No", "")).strip()
+                        if matched_mrn:
+                            sess["active_entities"]["mrn"] = matched_mrn
+            except Exception as e_sync:
+                print(f"[VisitSync] Notice: {e_sync}")
+
         active_mrn = sess["active_entities"].get("mrn")
         active_visit = sess["active_entities"].get("visit_no")
-        msg_lower = payload.message.lower()
+
 
         # Core Concept: If MRN is active but visit_no is unset, and inquiry is not a general screen/module lookup,
         # auto-resolve the latest encounter visit for that patient dynamically
@@ -950,6 +1060,53 @@ def chat_with_agent(payload: ChatRequest):
                         "executed_sql": cached_ephemeral.get("executed_sql", "")
                     }
                 )
+
+        # Dedicated Handler 00: Installation Parameters & Hospital System Settings
+        is_install_params_query = any(w in msg_lower for w in ["installation parameter", "installation_parameter", "installation parameters", "insurance method", "inurance method", "eclaim method", "dhpo url", "claim url"])
+        if is_install_params_query:
+            try:
+                ip_sql = "SELECT TOP 1 Insurance_Method, Insurance_Claim_URL, Insurance_Label_Text FROM Installation_Parameters"
+                ip_raw = autonomous_agent.execute_select_sql(ip_sql)
+                if ip_raw and ip_raw.strip().startswith("["):
+                    ip_rows = json.loads(ip_raw)
+                    if ip_rows and len(ip_rows) > 0:
+                        row = ip_rows[0]
+                        ins_method = row.get("Insurance_Method") or "DHA"
+                        claim_url = row.get("Insurance_Claim_URL") or "N/A"
+                        label_text = row.get("Insurance_Label_Text") or "N/A"
+                        
+                        if current_mode == "developer":
+                            ip_reply = (
+                                f"### 💻 Installation Parameters — Insurance Configuration\n"
+                                f"• **Insurance Method:** `{ins_method}`\n"
+                                f"• **Claim Submission URL:** `{claim_url}`\n"
+                                f"• **Insurance Label Text:** `{label_text}`\n\n"
+                                f"**Live MSSQL Query:**\n```sql\n{ip_sql}\n```\n"
+                                f"*(⚡ Executed on live MSSQL with 0 LLM Presentation Tokens)*"
+                            )
+                        else:
+                            ip_reply = (
+                                f"### 🏥 HIMES Installation Parameters\n\n"
+                                f"HIMES-ல் உள்ள `Installation_Parameters` அட்டவணையின்படி, தற்போதைய **Insurance Method**: **`{ins_method}`**.\n\n"
+                                f"• **Insurance Method:** `{ins_method}`\n"
+                                f"• **Claim Portal URL:** `{claim_url}`\n"
+                                f"• **Insurance Label:** `{label_text}`\n\n"
+                                f"> ✅ **Verification:** Live database record retrieved directly from `Installation_Parameters`."
+                            )
+                        update_session_memory(payload.session_id, payload.message, ip_reply, user_id=payload.user_id)
+                        return ChatResponse(
+                            status="success",
+                            reply=ip_reply,
+                            model_used="HIMES System Config Engine (0 Tokens)",
+                            mode=current_mode,
+                            action_executed={
+                                "installation_parameters_lookup": True,
+                                "insurance_method": ins_method,
+                                "executed_sql": ip_sql
+                            }
+                        )
+            except Exception as e:
+                print(f"[InstallParamsLookup] Error: {e}")
 
         # Dedicated Handler 0A: Patient Demographics Lookup (MRN -> Name, Phone, Gender, Age)
         is_demographics_query = (
@@ -1030,10 +1187,18 @@ def chat_with_agent(payload: ChatRequest):
                     action_executed={"mrn": active_mrn, "cached_valkey_5m": True}
                 )
 
-        # Core Concept: Patient Services & Encounter Orders Inquiry
+        # Core Concept: Patient Services & Encounter Orders Inquiry (single visit specific)
+        is_comparative_or_multi = any(w in msg_lower for w in [
+            "athula", "which", "entha", "oru visit", "ethana", "how many", "all", "ellam", "highest", "athiga", "lowest", "invoice", "invoices"
+        ])
         is_services_query = (
-            active_mrn and any(w in msg_lower for w in ["service", "cpt", "test", "bill", "order", "lab", "பில்", "பரிசோதனை", "சிகிச்சை", "فحوصات", "خدمات"])
+            active_mrn and not is_comparative_or_multi and any(w in msg_lower for w in [
+                "service", "services", "cpt", "unbilled service", "procedure", "procedures",
+                "lab order", "test", "tests", "சிகிச்சை", "பரிசோதனை", "service list",
+                "فحوصات", "خدمات", "فحص", "خدمة", "bill podadha", "bill aagadha", "unbilled"
+            ])
         )
+
         if is_services_query and active_visit:
             # Core Concept: Unbilled / Pending vs All Services
             is_unbilled_only = any(w in msg_lower for w in ["unbilled", "un-billed", "pending", "not bill", "podadha", "aagadha", "ஆகாத", "போடாத", "நிலுவை"]) or ("غير" in msg_lower and "مفوتر" in msg_lower)
@@ -1113,167 +1278,7 @@ def chat_with_agent(payload: ChatRequest):
                     action_executed={"mrn": active_mrn, "visit_no": active_visit, "services_count": len(srv_list), "cached_valkey_5m": True}
                 )
 
-        # ====================================================================
-        # TIER 1.5: SCHEMATIC FUNCTIONALITY-TO-QUERY ENGINE (0 TOKENS, LIVE MSSQL)
-        # ====================================================================
-        is_unbilled_intent = any(w in msg_lower for w in ["unbilled", "un-billed", "pending", "bill aagadha", "podadha", "not billed", "bill illatha", "பில் ஆகாத", "போடாத", "நிலுவை"]) or ("غير" in msg_lower and "مفوتر" in msg_lower)
-        is_lab_intent = any(w in msg_lower for w in ["lab", "laboratory", "blood test", "பரிசோதனை", "லேப்", "فحوصات", "تحاليل", "लैब"])
-        is_pharmacy_intent = any(w in msg_lower for w in ["pharmacy", "drug", "prescription", "medicine", "marunthu", "மருந்து", "பார்மசி", "أدوية", "صيدلية", "दवा"])
-        is_services_intent = any(w in msg_lower for w in ["service", "services", "orders", "சேவை", "சேவைகள்", "خدمات"])
-        is_recent_visits_intent = any(w in msg_lower for w in ["recent patient visits", "recent visits", "latest visits", "today visits", "active visits", "visits list", "சமீபத்திய வருகைகள்", "patient visits list", "விசிட் லிஸ்ட்"])
 
-        functionality_sql = None
-        functionality_title = ""
-
-        if is_unbilled_intent and is_lab_intent:
-            functionality_title = "Unbilled Laboratory Services"
-            functionality_sql = """
-            SELECT TOP 50
-                pvbd.Permanent_Visit_No,
-                pbd.Permanent_MRN_No,
-                s.Service_Description,
-                s.CPT_Code,
-                pvs.Service_Quantity,
-                pvs.Service_Gross_Amount,
-                pvs.Service_Net_Amount,
-                pvs.Is_Service_Billed,
-                pvs.Patient_Payment_Type_Code
-            FROM Patient_Visit_Services pvs WITH(NOLOCK)
-            JOIN Patient_Visit_Basic_Details pvbd WITH(NOLOCK) ON pvs.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No
-            JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
-            JOIN Service_USSDB sussdb WITH(NOLOCK) ON sussdb.Service_USSDB_Serial_No = pvs.Service_USSDB_Serial_No
-            JOIN Service s WITH(NOLOCK) ON s.Service_Serial_No = sussdb.Service_Serial_No
-            WHERE pvs.Active_Status = 'A'
-              AND pvs.Patient_Visit_Service_Cancellation_Flag = 'N'
-              AND pvs.Is_Service_Billed = 'N'
-              AND (s.Service_Description LIKE '%LAB%' OR s.Service_Description LIKE '%TEST%' OR s.Service_Description LIKE '%BLOOD%' OR s.Service_Description LIKE '%PROFILE%' OR s.Service_Description LIKE '%CBC%' OR s.Service_Description LIKE '%PANEL%')
-            ORDER BY pvs.Patient_Visit_Services_Serial_No DESC
-            """
-        elif is_unbilled_intent and is_pharmacy_intent:
-            functionality_title = "Unbilled Pharmacy & Medications"
-            functionality_sql = """
-            SELECT TOP 50
-                pvbd.Permanent_Visit_No,
-                pbd.Permanent_MRN_No,
-                s.Service_Description,
-                s.CPT_Code,
-                pvs.Service_Quantity,
-                pvs.Service_Gross_Amount,
-                pvs.Service_Net_Amount,
-                pvs.Is_Service_Billed,
-                pvs.Patient_Payment_Type_Code
-            FROM Patient_Visit_Services pvs WITH(NOLOCK)
-            JOIN Patient_Visit_Basic_Details pvbd WITH(NOLOCK) ON pvs.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No
-            JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
-            JOIN Service_USSDB sussdb WITH(NOLOCK) ON sussdb.Service_USSDB_Serial_No = pvs.Service_USSDB_Serial_No
-            JOIN Service s WITH(NOLOCK) ON s.Service_Serial_No = sussdb.Service_Serial_No
-            WHERE pvs.Active_Status = 'A'
-              AND pvs.Patient_Visit_Service_Cancellation_Flag = 'N'
-              AND pvs.Is_Service_Billed = 'N'
-              AND (s.Service_Description LIKE '%PHARM%' OR s.Service_Description LIKE '%DRUG%' OR s.Service_Description LIKE '%TAB%' OR s.Service_Description LIKE '%SYR%' OR s.Service_Description LIKE '%CAP%' OR s.Service_Description LIKE '%INJ%')
-            ORDER BY pvs.Patient_Visit_Services_Serial_No DESC
-            """
-        elif is_unbilled_intent and (is_services_intent or "unbilled" in msg_lower):
-            functionality_title = "Hospital Unbilled Services"
-            functionality_sql = """
-            SELECT TOP 50
-                pvbd.Permanent_Visit_No,
-                pbd.Permanent_MRN_No,
-                s.Service_Description,
-                s.CPT_Code,
-                pvs.Service_Quantity,
-                pvs.Service_Gross_Amount,
-                pvs.Service_Net_Amount,
-                pvs.Is_Service_Billed,
-                pvs.Patient_Payment_Type_Code
-            FROM Patient_Visit_Services pvs WITH(NOLOCK)
-            JOIN Patient_Visit_Basic_Details pvbd WITH(NOLOCK) ON pvs.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No
-            JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
-            JOIN Service_USSDB sussdb WITH(NOLOCK) ON sussdb.Service_USSDB_Serial_No = pvs.Service_USSDB_Serial_No
-            JOIN Service s WITH(NOLOCK) ON s.Service_Serial_No = sussdb.Service_Serial_No
-            WHERE pvs.Active_Status = 'A'
-              AND pvs.Patient_Visit_Service_Cancellation_Flag = 'N'
-              AND pvs.Is_Service_Billed = 'N'
-            ORDER BY pvs.Patient_Visit_Services_Serial_No DESC
-            """
-        elif not is_unbilled_intent and any(w in msg_lower for w in ["pending lab results", "pending lab", "lab results pending", "lab result varatha"]):
-            functionality_title = "Pending Laboratory Orders & Results"
-            functionality_sql = """
-            SELECT TOP 50
-                pvbd.Permanent_Visit_No,
-                pbd.Permanent_MRN_No,
-                s.Service_Description,
-                loi.Result_Value,
-                loi.Reference_Range,
-                loi.Active_Status AS Test_Status
-            FROM Patient_Visit_Lab_Order lo WITH(NOLOCK)
-            JOIN Lab_Order_Item_Result loi WITH(NOLOCK) ON lo.Patient_Visit_Lab_Order_Serial_No = loi.Patient_Visit_Lab_Order_Serial_No
-            JOIN Patient_Visit_Basic_Details pvbd WITH(NOLOCK) ON lo.Patient_Visit_Basic_Details_Serial_No = pvbd.Patient_Visit_Basic_Details_Serial_No
-            JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
-            JOIN Service s WITH(NOLOCK) ON loi.Service_Serial_No = s.Service_Serial_No
-            WHERE lo.Active_Status = 'A'
-              AND (loi.Result_Value IS NULL OR loi.Result_Value = '' OR loi.Active_Status != 'A')
-            ORDER BY lo.Patient_Visit_Lab_Order_Serial_No DESC
-            """
-        elif is_recent_visits_intent:
-            functionality_title = "Recent Patient Visits"
-            functionality_sql = """
-            SELECT TOP 25
-                pvbd.Permanent_Visit_No,
-                pbd.Permanent_MRN_No,
-                CONCAT(ppd.Patient_First_Name, ' ', ppd.Patient_Last_Name) AS Patient_Name,
-                pvbd.Visit_Type_Code,
-                pvbd.Created_Date_Time AS Visit_Date,
-                pvbd.Active_Status
-            FROM Patient_Visit_Basic_Details pvbd WITH(NOLOCK)
-            JOIN Patient_Basic_Details pbd WITH(NOLOCK) ON pvbd.Patient_Basic_Details_Serial_No = pbd.Patient_Basic_Details_Serial_No
-            LEFT JOIN Patient_Personal_Details ppd WITH(NOLOCK) ON pbd.Patient_Master_Serial_No = ppd.Patient_Master_Serial_No
-            WHERE pvbd.Active_Status = 'A'
-            ORDER BY pvbd.Patient_Visit_Basic_Details_Serial_No DESC
-            """
-
-        if functionality_sql and not active_mrn:
-            t0 = time.time()
-            raw_func_res = autonomous_agent.execute_select_sql(functionality_sql.strip())
-            func_latency = round((time.time() - t0) * 1000, 2)
-            parsed_func = json.loads(raw_func_res) if raw_func_res and raw_func_res.startswith("[") else []
-
-            from utils.table_formatter import format_user_friendly_response
-            func_reply = format_user_friendly_response(
-                parsed_func,
-                query_context={
-                    "user_query": payload.message,
-                    "executed_sql": functionality_sql.strip(),
-                    "latency_ms": func_latency,
-                    "title": functionality_title
-                },
-                mode=current_mode
-            )
-
-            # Ephemeral Cache in Valkey for 5 minutes
-            valkey_manager.cache_ephemeral_query(
-                payload.message,
-                active_mrn="",
-                session_id=payload.session_id,
-                formatted_response=func_reply,
-                executed_sql=functionality_sql.strip(),
-                ttl=300
-            )
-            update_session_memory(payload.session_id, payload.message, func_reply, user_id=payload.user_id)
-            return ChatResponse(
-                status="success",
-                reply=func_reply,
-                model_used="HIMES Schematic NL2SQL Engine (0 LLM Tokens, Live MSSQL)",
-                mode=current_mode,
-                action_executed={
-                    "functionality_nl2sql": True,
-                    "title": functionality_title,
-                    "sql": functionality_sql.strip(),
-                    "row_count": len(parsed_func),
-                    "latency_ms": func_latency,
-                    "cached_valkey_5m": True
-                }
-            )
 
         # 1. Valkey Fast-Path: Menu Navigation Lookup
         msg_lower = payload.message.lower()
@@ -1455,6 +1460,7 @@ def chat_with_agent(payload: ChatRequest):
         # Build enriched context with session memory and Valkey Hybrid Search
         full_context = dict(payload.context or {})
         full_context["is_developer_mode"] = is_developer_mode
+        full_context["attachments"] = payload.attachments or []
 
         # Determine if query is a general module or screen inquiry rather than a visit follow-up
         is_module_or_screen_query = any(w in msg_lower for w in ["module", "screen", "menu", "workflow", "lifecycle", "page", "viewglobal", "view"]) and not bool(v_m)
@@ -1467,10 +1473,10 @@ def chat_with_agent(payload: ChatRequest):
             from memory.session_memory import get_session_memory
             v_mem = get_session_memory(payload.session_id, user_id=payload.user_id)
             v_turns = v_mem.get_history()
-            full_context["previous_chat_turns"] = v_turns[-5:] if v_turns else list(sess["turns"][-5:])
-            full_context["recent_history_context"] = v_mem.format_context_for_prompt(max_turns=5)
+            full_context["previous_chat_turns"] = v_turns[-10:] if v_turns else list(sess["turns"][-10:])
+            full_context["recent_history_context"] = v_mem.format_context_for_prompt(max_turns=10)
         except Exception:
-            full_context["previous_chat_turns"] = list(sess["turns"][-5:])
+            full_context["previous_chat_turns"] = list(sess["turns"][-10:])
 
         # Valkey Smart Hybrid Context enrichment
         valkey_ctx = get_himes_context(payload.message, limit=2)
@@ -1502,14 +1508,6 @@ def chat_with_agent(payload: ChatRequest):
                 "steps": len(chain_res.get("steps_run", [])),
             }
         else:
-            classified_intent = himes_orchestrator.classify_intent(effective_message, full_context)
-            if classified_intent == "engineering_dev" and payload.is_admin:
-                current_mode = "developer"
-                is_developer_mode = True
-            elif not payload.is_admin:
-                current_mode = "user"
-                is_developer_mode = False
-
             agent_res = himes_orchestrator.dispatch(effective_message, full_context, is_dev_mode=is_developer_mode)
         reply_text = agent_res.get("reply", "No response generated.")
         actions_taken = agent_res.get("actions_taken", [])
@@ -1530,9 +1528,13 @@ def chat_with_agent(payload: ChatRequest):
                 tech_details += f"**Cache & State Store:**\n{cache_info}"
                 reply_text += tech_details
 
+        # Strict Multi-Lingual & Tanglish Language Mirroring via Language Specialist Agent
+        reply_text = language_specialist.mirror_reply(reply_text, user_lang)
+
         # Update session memory
         update_session_memory(payload.session_id, payload.message, reply_text, user_id=payload.user_id)
         valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
+
 
         # 4. Save into ChromaDB Semantic Cache (STRICTLY PROHIBITED for patient/visit data)
         if not is_followup and not is_patient_query and not is_patient_or_phi_data(payload.message, reply_text):

@@ -31,8 +31,8 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # Valkey TTL for session memory (1 hour)
 SESSION_TTL = 3600
-# Sliding window — keep last N turns
-WINDOW_K = 5
+# Sliding window — keep last N turns (10 complete turns for multi-turn conversational continuity)
+WINDOW_K = 10
 
 
 class ConversationBufferWindowMemory:
@@ -254,18 +254,18 @@ class ValkeySessionMemory(BaseChatMessageHistory):
 
     def format_context_for_prompt(self, max_turns: int = WINDOW_K) -> str:
         """
-        Returns a compact text block of recent conversation history (last 5 turns)
-        suitable for injecting into an LLM system prompt.
+        Returns a rich text block of recent conversation history (up to last 10 turns)
+        suitable for injecting into an LLM system prompt for conversational co-reference resolution.
         """
         turns = self.get_history()
         if not turns:
             return ""
         recent = turns[-max_turns:]
-        lines = ["### Recent Conversation History (Last 5 Turns):"]
+        lines = [f"### FULL SESSION CHAT HISTORY (Last {len(recent)} Turns - Chronological):"]
         for i, t in enumerate(recent, 1):
             lines.append(f"Turn {i}:")
             lines.append(f"  User: {t.get('user', '')}")
-            lines.append(f"  Agent: {t.get('ai', '')[:250]}...")
+            lines.append(f"  Assistant: {str(t.get('ai', ''))[:1200]}")
         return "\n".join(lines)
 
 

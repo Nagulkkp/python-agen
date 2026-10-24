@@ -28,6 +28,9 @@ from memory_manager import search_knowledge_base
 from autonomous_agent import autonomous_agent
 from guardrails import SecurityException
 from generation.rag_pipeline import rag_pipeline
+from language_specialist_agent import language_specialist
+
+
 
 # ---------------------------------------------------------------------------
 # Base Specialist Agent
@@ -496,40 +499,6 @@ class EngineeringDevAgent(BaseSpecialistAgent):
         )
 
     def handle(self, query: str, context: Dict[str, Any], is_dev_mode: bool = True) -> Dict[str, Any]:
-        query_lower = query.lower()
-        
-        # Dedicated Fast Resolution for patientvisitdetails.blade.php array offset warning
-        if "patientvisitdetails.blade.php" in query_lower and any(w in query_lower for w in ["array offset", "bool", "562", "warning"]):
-            reply = (
-                "### 🛠️ Live Production Bug Analysis & Git Push Report\n\n"
-                "**1. Target File & Error Location:**\n"
-                "• **Production Path:** `/var/www/html/FHGDXB/resources/views/billing/PatientBilling/patientvisitdetails.blade.php` (Line 562)\n"
-                "• **Development Path:** `/L9/nagul/himes-ai/resources/views/billing/PatientBilling/patientvisitdetails.blade.php`\n"
-                "• **Reported Warning:** `local.Warning: Trying to access array offset on value of type bool`\n\n"
-                "**2. Root Cause Analysis:**\n"
-                "At line 562, `$exeInsPlan[0]['Visit_PatShare_Limit']` was accessed directly. In scenarios where a patient visit has no insurance plan or the database query returns `false`, `$exeInsPlan` evaluates to a boolean (`false`), triggering PHP's array offset warning on bool.\n\n"
-                "**3. Code Fix Applied:**\n"
-                "```php\n"
-                "// Before:\n"
-                "$InsplanVisitPatLimit = $exeInsPlan[0]['Visit_PatShare_Limit'];\n"
-                "\n"
-                "// After (Safe Type Checking):\n"
-                "$InsplanVisitPatLimit = (is_array($exeInsPlan) && isset($exeInsPlan[0]['Visit_PatShare_Limit'])) \n"
-                "    ? $exeInsPlan[0]['Visit_PatShare_Limit'] \n"
-                "    : 0;\n"
-                "$VLimit = $InsplanVisitPatLimit;\n"
-                "```\n\n"
-                "**4. Syntax Verification:**\n"
-                "• `php -l /L9/nagul/himes-ai/resources/views/billing/PatientBilling/patientvisitdetails.blade.php`\n"
-                "• ✅ **Result:** `No syntax errors detected in patientvisitdetails.blade.php`\n\n"
-                "**5. Git Push Details:**\n"
-                "• **Branch Name:** `fix/patientvisitdetails-array-offset`\n"
-                "• **Repository:** `https://github.com/intuitmicrotech/himes.git`\n"
-                "• **Pull Request URL:** `https://github.com/intuitmicrotech/himes/pull/new/fix/patientvisitdetails-array-offset`\n"
-                "• **Status:** Successfully committed and pushed to remote GitHub branch."
-            )
-            return {"reply": reply, "agent": self.name, "action": "code_fix_and_git_push"}
-
         return autonomous_agent.run(query, context)
 
 
@@ -542,6 +511,7 @@ class HimesOrchestrator:
     routes to specialist sub-agents, and enforces Dual Mode formatting.
     """
     def __init__(self):
+        self.language_agent = language_specialist
         self.knowledge_agent = HospitalKnowledgeAgent()
         self.diagnostics_agent = VitalsAndDiagnosticsAgent()
         self.prescription_agent = PrescriptionAndErxAgent()
@@ -567,22 +537,22 @@ class HimesOrchestrator:
 
         # 2. Clinical SOP / Protocol / Knowledge Intent
         sop_indicators = [
-            "sop", "protocol", "triage", "esi", "icu criteria", "discharge criteria",
-            "admission criteria", "code blue", "cardiac arrest", "vacutainer", "tube", "tube color",
+            "sop", "protocol", "triage", "icu criteria", "discharge criteria",
+            "admission criteria", "code blue", "cardiac arrest", "vacutainer", "tube color",
             "blood tube", "inversion", "inversions", "critical values", "panic values list", "stewardship",
-            "restricted antibiotic", "turnaround time", "tat", "westgard", "qc protocol", "specimen",
+            "restricted antibiotic", "turnaround time", "westgard", "qc protocol", "specimen",
             "blood collection", "order of draw"
         ]
-        if any(w in msg for w in sop_indicators):
+        if any(w in msg for w in sop_indicators) or re.search(r'\b(tat|esi)\b', msg):
             return "hospital_knowledge"
 
         # 3. Vitals & Lab Diagnostics Intent + Live Panic Check
         diag_indicators = [
-            "vital", "vitals", "bp", "pulse", "spo2", "temperature", "temp", "heart rate",
+            "vital", "vitals", "pulse", "spo2", "temperature", "temp", "heart rate",
             "pain scale", "lab result", "potassium", "sodium", "calcium", "glucose", "hemoglobin",
             "platelet", "platelets", "wbc", "troponin", "lactate", "panic", "critical alert", "critical value"
         ]
-        if any(w in msg for w in diag_indicators):
+        if any(w in msg for w in diag_indicators) or re.search(r'\bbp\b', msg):
             return "vitals_and_diagnostics"
 
         # 4. Prescription / Pharmacy / Antibiotics Intent
@@ -591,42 +561,64 @@ class HimesOrchestrator:
             "meropenem", "vancomycin", "colistin", "antibiotic", "imipenem", "linezolid",
             "piperacillin", "tazobactam"
         ]
-        if any(w in msg for w in rx_indicators):
+        if any(w in msg for w in rx_indicators) or re.search(r'\brx\b', msg):
             return "prescription_and_erx"
 
-        # 5. Patient Profile / Visit History Intent
-        patient_indicators = ["patient details", "mrn", "patient profile", "patient name", "demographics", "last 5 visit", "last 10 visit", "visits for mrn"]
-        if any(w in msg for w in patient_indicators):
+        # 5. Patient Profile / Demographic Lookup Intent (excludes billing/service/diagnostic queries)
+        is_services_or_billing = any(w in msg for w in ["service", "services", "unbilled", "bill", "billing", "cpt", "test", "procedure", "lab order", "فحوصات", "غير مفوتر", "பில்", "podadha", "aagadha", "invoice"])
+        patient_indicators = ["patient details", "patient profile", "patient name", "demographics", "last 5 visit", "last 10 visit", "visits for mrn"]
+        if not is_services_or_billing and (any(w in msg for w in patient_indicators) or (re.search(r'\b(profile|demographics)\b', msg) and "mrn" in msg)):
             return "patient_visit"
+
 
         # 6. Default / Hybrid
         return "general_hybrid"
 
     def dispatch(self, user_msg: str, context: Dict[str, Any], is_dev_mode: bool = False) -> Dict[str, Any]:
         """
-        Orchestrates execution by dispatching to the designated specialist.
+        Orchestrates execution by:
+        1. Detecting exact user language via LanguageSpecialistAgent.
+        2. Normalizing non-English queries into English for database execution.
+        3. Dispatching to designated specialist.
+        4. Mirroring final response into the user's exact language.
         """
-        intent = self.classify_intent(user_msg, context)
         start_time = time.time()
+        
+        # 1. Multi-Agent Language Detection & Normalization
+        lang_info = self.language_agent.detect_language(user_msg)
+        norm_english = self.language_agent.normalize_to_english(user_msg, lang_info) if not lang_info.get("is_english") else user_msg
+
+        ctx = dict(context or {})
+        ctx["user_language"] = lang_info
+        ctx["normalized_english_query"] = norm_english
+
+        intent = self.classify_intent(user_msg, ctx)
 
         if intent == "hospital_knowledge":
-            res = self.knowledge_agent.handle(user_msg, context, is_dev_mode)
+            res = self.knowledge_agent.handle(user_msg, ctx, is_dev_mode)
         elif intent == "vitals_and_diagnostics":
-            res = self.diagnostics_agent.handle(user_msg, context, is_dev_mode)
+            res = self.diagnostics_agent.handle(user_msg, ctx, is_dev_mode)
         elif intent == "prescription_and_erx":
-            res = self.prescription_agent.handle(user_msg, context, is_dev_mode)
+            res = self.prescription_agent.handle(user_msg, ctx, is_dev_mode)
         elif intent == "patient_visit":
-            res = self.visit_agent.handle(user_msg, context, is_dev_mode)
+            res = self.visit_agent.handle(user_msg, ctx, is_dev_mode)
         elif intent == "engineering_dev":
-            res = self.dev_agent.handle(user_msg, context, is_dev_mode)
+            res = self.dev_agent.handle(user_msg, ctx, is_dev_mode)
         else:
             # Fallback to general autonomous agent
-            res = autonomous_agent.run(user_msg, context)
+            res = autonomous_agent.run(user_msg, ctx)
+
+        # 2. Strict Multilingual Response Mirroring
+        raw_reply = res.get("reply", "")
+        if raw_reply:
+            res["reply"] = self.language_agent.mirror_reply(raw_reply, lang_info)
 
         elapsed = round(time.time() - start_time, 3)
         res["orchestrator_intent"] = intent
+        res["detected_language"] = lang_info.get("language_name")
         res["execution_time_sec"] = elapsed
         return res
+
 
 # Global instance
 himes_orchestrator = HimesOrchestrator()
