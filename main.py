@@ -668,10 +668,10 @@ def format_user_mode_response(reply: str) -> str:
     text = re.sub(r'\*?\(?⚡\s*Real-Time\s+Live\s+MSSQL\s+Execution.*?(?:\)\*?|\n|$)', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\b192\.168\.\d+\.\d+\b', '', text)
 
-    # 5c. Strip raw URL routes and parentheticals like (/Appointment Calendar Scheduler)
-    text = re.sub(r'\(\s*/[A-Za-z0-9_\-\s/]+\s*\)', '', text)
-    text = re.sub(r'\(\s*/?[A-Za-z0-9_\-\s/]*(?:Scheduler|Registration|Panel|Controller|routes)[A-Za-z0-9_\-\s/]*\)', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'/(?:viewQuickRegistration|patientRegistration|appointmentScheduler|AppointmentCalendarScheduler|emrVisitEntryPanel)\b', '', text, flags=re.IGNORECASE)
+    # 5c. Strip raw URL routes and parentheticals like (/Appointment Calendar Scheduler) or (/patientBilling)
+    text = re.sub(r'\(\s*/[A-Za-z0-9_\-\s/{}\?]+\s*\)', '', text)
+    text = re.sub(r'\(\s*/?[A-Za-z0-9_\-\s/]*(?:Scheduler|Registration|Panel|Controller|Billing|routes)[A-Za-z0-9_\-\s/]*\)', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'/(?:viewQuickRegistration|patientRegistration|appointmentScheduler|AppointmentCalendarScheduler|emrVisitEntryPanel|patientBilling|viewGlobalPatientBilling|addPatientBilling|editPatientBilling)\b', '', text, flags=re.IGNORECASE)
 
     # 5d. User Mode: Mask raw SQL table names, primary keys, and cron names with intuitive healthcare terms
     table_replacements = [
@@ -698,6 +698,37 @@ def format_user_mode_response(reply: str) -> str:
         (r'`?Patient_Visit_Admission_Details`?', 'Inpatient Admission Details'),
         (r'`?Patient_Basic_Details_Link_Merging`?', 'Patient Merge Records'),
         (r'`?Patient_Identification_Details`?', 'Patient Identification Documents'),
+        # Billing Tables & Columns
+        (r'`?Patient_Bill_Header`?', 'Patient Invoice'),
+        (r'`?Patient_Bill_Detail_Services_Packages_Resources_Drugs`?', 'Invoice Line Items'),
+        (r'`?Patient_Bill_Details`?', 'Invoice Item Details'),
+        (r'`?Patient_Bill_Header_Payments_Received`?', 'Payment Receipts'),
+        (r'`?Receipts_For_Payments_Received`?', 'Official Receipt Vouchers'),
+        (r'`?Patient_Visit_Deposits_Adjusted_Bills`?', 'Deposit Adjustment Records'),
+        (r'`?Patient_Deposit_Log`?', 'Patient Advance Deposit Balance'),
+        (r'`?Patient_Visit_Deposits`?', 'Advance Deposit Records'),
+        (r'`?Patient_Visit_Credit_Notes`?', 'Patient Credit Notes'),
+        (r'`?Credit_Notes`?', 'Credit Note Register'),
+        (r'`?Invoice_Cancel_Request`?', 'Invoice Cancellation Requests'),
+        (r'`?Patient_Refund_Details`?', 'Refund Records'),
+        (r'`?Patient_Visit_Services`?', 'Visit Clinical Services'),
+        (r'`?Patient_Visit_Drug_Item_Details`?', 'Prescribed Medication Items'),
+        (r'`?Patient_Visit_Inventory_Billing`?', 'Pharmacy Billing Records'),
+        (r'`?Patient_Visit_IPD_Bed_Details`?', 'Inpatient Bed & Room Charges'),
+        (r'`?User_Wise_Discount_Limit`?', 'Staff Discount Authorizations'),
+        (r'`?Patient_Visit_Discount_Log`?', 'Discount Approval History'),
+        (r'`?List_Based_Column_Swapping`?', 'Table Grid Preferences'),
+        (r'`?User_Based_Column_Swapping`?', 'User Grid Preferences'),
+        (r'`?Service_Rate_For_Non_Insurance`?', 'Self-Pay Cash Tariff'),
+        (r'`?Service_Rate_For_Insurance`?', 'Insurance Network Tariff'),
+        (r'`?Stock_Item_Price`?', 'Pharmacy Cash Price List'),
+        (r'`?Stock_Item_Insurance_Price`?', 'Pharmacy Insurance Price List'),
+        (r'`?Branch_Free_Paid_Followup_Services`?', 'Follow-up Service Rules'),
+        # Controllers & Parameters
+        (r'`?PatientBillingGetCont(?:roller)?(?:\.php)?`?', 'Patient Billing Service'),
+        (r'`?PatientBillingPartOneController(?:\.php)?`?', 'Billing Engine Service'),
+        (r'`?PatientBillingController(?:\.php)?`?', 'Billing Counter Service'),
+        (r'`?GlobalViewPatientBillingController(?:\.php)?`?', 'Global Billing Monitor'),
         (r'`?QuickDemoRegController(?:\.php)?`?', 'Quick Registration Service'),
         (r'`?QuickRegistrationController(?:\.php)?`?', 'Quick Registration Service'),
         (r'`?RegistrationTabController(?:\.php)?`?', 'Detailed Registration Service'),

@@ -633,6 +633,38 @@ HIMES ARCHITECTURE & DATABASE SCHEMA GUIDANCE:
     - Table: `prior_status`
     - Core Columns: `Prior_Status_Code`, `Prior_Status_Name`, `Identification_Color_Code`, `Active_Status`
     - Query: `SELECT * FROM prior_status`
+    - Note on Cash Patients: Pure cash (self-pay) patients NEVER require insurance prior authorization because no insurance claim is generated. Pre-auth applies strictly to Insurance / Corporate credit patients.
+  * SENIOR ARCHITECT BILLING WORKFLOW SPECIFICATION:
+    - Dual Interface: Standalone Billing Screen (`/patientBilling/{id?}` via `PatientBillingGetCont`) for dedicated cashier desks vs Embedded Registration Billing Tab (`/patientRegistration` Tab: Bill via `RegistrationTabController`) for immediate check-in collection.
+    - 3 Core Item Pillars:
+      1. Clinical Services: `Patient_Visit_Services` (`Is_Service_Billed = 'N' -> 'Y'`).
+      2. Pharmacy & Inventory: `Patient_Visit_Drug_Item_Details` & `Patient_Visit_Inventory_Billing`.
+      3. Bed Management: `Patient_Visit_IPD_Bed_Details` (`getBillingBedManagementGrid`).
+    - Multi-Invoice Architecture per Visit:
+      * One visit can have multiple sequential invoices (`Patient_Bill_Header`).
+      * Partial billing creates Invoice #1 for selected items; unselected items remain in the Pending Queue (`Is_Service_Billed = 'N'`).
+      * Global View Monitor (`viewGlobalPatientBilling`): Row 1 displays Billed Invoice; Row 2 displays Pending Services.
+      * Unbilled items from prior visits are carried forward via `Patient_Previous_Visit_Basic_Details_Serial_No` and badged `Target_Visit_No`.
+    - Invoice Lifecycle State Machine:
+      * Draft / Open: `Is_Bill_Finalized = 'N'`, `Bill_Cancellation_Flag = 'N'`. Fully editable.
+      * Finalized / Closed: `Is_Bill_Finalized = 'C'` or `'Y'`, `Closed_By_User_Id != NULL`. Locked against edits.
+      * Privileged Revert: Allowed only if user holds `isRevertInvoice` and `Revert` ACL privileges and invoice has not been batched for claim submission.
+      * Claim Posted: `Is_Bill_Posted_To_Insurance_Claim = 'Y'`. Permanently sealed; deletion and revert strictly blocked.
+      * Cancelled / Voided: `Bill_Cancellation_Flag = 'Y'` via `cancelInvoiceUpdate()`. Reverses receivables, voids receipts, and restores inventory stock via `returnallstockfromcustomerQtyforcancelrequest()`.
+    - Calculation Pipeline:
+      * Gross = Unit Price * Quantity.
+      * Row Discount = Gross * (Discount_% / 100). Enforced by `User_Wise_Discount_Limit`. Supervisor discount code required if exceeded.
+      * Additional Invoice Discount: Pro-rated across eligible lines based on net before additional discount.
+      * Co-Pay & Deductible Split: From `Insurance_Plan_Department_Cover`. Patient Share = MIN(Line Net * Co-Pay %, Deductible Cap). Insurance Share = Net - Patient Share. Pre-auth approved limits cap insurance share; excess shifts to patient.
+      * VAT / Tax Engine: Tax Rate T%. Patient Tax = Patient Share * (T% / 100); Insurance Tax = Insurance Share * (T% / 100).
+    - Settlements & Deposits:
+      * Supports Cash, Card, Bank, and Advance Deposit adjustment (`Patient_Visit_Deposits_Adjusted_Bills` / `Patient_Deposit_Log`).
+      * Short Payment: Uncollected balance logged in `Patient_Bill_Header.Short_Payment_Value` with mandatory reason code (`short_discountCodeModal`).
+      * Excess Refund: Reduced bill after payment triggers `refundamt` dialog to issue cash refund or wallet credit.
+      * Credit Notes: Post-closure cancellations generate sequential credit notes via `AddCreditNote()`.
+    - Customization & Security:
+      * Column swapping via `List_Based_Column_Swapping` and `User_Based_Column_Swapping` (`Function_Id = 'billhd'`).
+      * ACL privileges configured in `config/functions.php` (`billhd_add`, `billhd_edit`, `billhd_GENERATE CLOSE`, `billhd_REVERT`, `billhd_CancelInv`, `billhd_UtilizeDeposit`, etc.).
 - PHARMACY PATIENTS, MRNs, BILLS & OP PHARMACY SCREEN:
   * In HIMES, Pharmacy patients can be registered separately with MRNs starting with 'PHAR' (e.g., PHAR2120, PHAR2119, PHAR2118):
     - Table: `Pharmacy_Patient_Basic_Details` (Columns: `Pharmacy_Permanent_MRN_No`, `Pharmacy_Temporary_MRN_No`, `Patient_First_Name`, `Patient_Last_Name`, `Contact_Phone_Mobile`)

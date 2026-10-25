@@ -528,6 +528,19 @@ class ValkeyHimesManager:
                     "Waiting List Promotion: Cancelling CF auto-promotes earliest WF to CF (autoCompleteController.php:2143).",
                     "Visit Conversion: RegistrationAppointmentPostController links Patient_Appointment into Patient_Visit_Appointments and creates live Patient_Visit_Basic_Details."
                 ]
+            },
+            "billing_workflow": {
+                "description": "HIMES Patient Billing & Financial Management System",
+                "rules": [
+                    "Dual Entry Points: Standalone Billing Screen (/patientBilling/{id?} / PatientBillingGetCont) vs Embedded Registration Billing Tab (/patientRegistration Tab: Bill / RegistrationTabController).",
+                    "3 Billing Item Pillars: Services (Patient_Visit_Services), Inventory Items & Pharmacy (Patient_Visit_Drug_Item_Details & Patient_Visit_Inventory_Billing), and Bed Services (Patient_Visit_IPD_Bed_Details).",
+                    "Multi-Invoice Architecture: Multiple invoices per encounter. Partial billing creates Invoice #1 (pbsrd.Bill_Header_Serial_No); unselected items remain unbilled (Is_Service_Billed = 'N') in Pending Queue for Invoice #2. Carry-forward unbilled items from prior visits via Patient_Previous_Visit_Basic_Details_Serial_No.",
+                    "Invoice Lifecycle State Machine: Draft/Open (Is_Bill_Finalized = 'N'), Finalized/Closed (Is_Bill_Finalized = 'C' or 'Y', Closed_By_User_Id), Privileged Revert (revertInvoiceInsData resets to 'N'), Claim Posted (Is_Bill_Posted_To_Insurance_Claim = 'Y' permanently sealed), and Cancelled (Bill_Cancellation_Flag = 'Y').",
+                    "Calculation Pipeline: Gross = Unit Price x Qty; Row Discount = Gross x (D%/100) enforced by User_Wise_Discount_Limit; Additional Invoice Discount pro-rated across eligible lines; Copay/Deductible Split based on Insurance_Plan_Department_Cover (CP% and Deductible Cap); VAT/Tax computed on Net and split into Patient Tax and Insurance Tax.",
+                    "Payment Settlement: Multi-mode collection (Cash, Card, Bank, Online). Deposit Adjustment draws from Patient_Visit_Deposits_Adjusted_Bills / Patient_Deposit_Log. Short payment logged in Short_Payment_Value with mandatory supervisor reason code.",
+                    "Refunds & Credit Notes: Recalculation excess refunded via refundamt dialog. Finalized invoice reversals use AddCreditNote() to generate official Credit Notes. Invoice cancellation restores inventory stock via returnallstockfromcustomerQtyforcancelrequest().",
+                    "UI Customization & ACL: Drag-and-drop column swapping (List_Based_Column_Swapping / User_Based_Column_Swapping). Protected by role privileges in config/functions.php (billhd_add, billhd_edit, billhd_GENERATE CLOSE, billhd_REVERT, billhd_CancelInv, billhd_UtilizeDeposit, etc.)."
+                ]
             }
         }
 
