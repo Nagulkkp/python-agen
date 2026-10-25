@@ -32,7 +32,7 @@ from guardrails import (
 )
 from ssh_sandbox import sandboxed_ssh
 from git_automation import SafeGitWorkflow
-from autonomous_agent import autonomous_agent
+from autonomous_agent import autonomous_agent, clean_agent_thought
 from multi_agent_system import himes_orchestrator
 from language_specialist_agent import language_specialist
 from memory_manager import search_knowledge_base
@@ -598,19 +598,8 @@ def format_user_mode_response(reply: str) -> str:
 
     text = reply
 
-    # 0. Strip any internal Thought prefix, rules reflection, or Final Answer prefix
-    if 'Final Answer:' in text:
-        text = text.split('Final Answer:', 1)[-1].strip()
-
-    # Strip scratchpad thought blocks if Final Answer marker was omitted
-    text = re.sub(
-        r'^(?:Thought:)?\s*(?:The user is asking|According to the rules|I should|Let me check|Let\'s formulate)[\s\S]*?(?=(?:✅|⚠️|ℹ️|🩺|\*\*Appointment|\*\*Status|[A-Za-z0-9_-]+\s*screen|Intha|Indru|Inaikki|Aama|Illa|Vanakkam|Neenga|Hello|Hi))',
-        '',
-        text,
-        flags=re.IGNORECASE
-    ).strip()
-    text = re.sub(r'^Let\'s formulate the final response[^\n]*\n*', '', text, flags=re.IGNORECASE).strip()
-    text = re.sub(r'^Thought:\s*', '', text, flags=re.IGNORECASE).strip()
+    # 0. Clean LLM internal thoughts, scratchpad, rules reflection, and Final Answer prefixes
+    text = clean_agent_thought(reply)
 
     # In USER MODE: Completely remove all technical <details>...</details> and <summary>...</summary> accordions
     text = re.sub(r'<details[\s\S]*?</details>', '', text, flags=re.IGNORECASE).strip()

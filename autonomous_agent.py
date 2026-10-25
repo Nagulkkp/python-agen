@@ -21,7 +21,46 @@ from ssh_sandbox import sandboxed_ssh
 from guardrails import validate_sql_query, validate_command_directory_safety, SecurityException
 from git_automation import SafeGitWorkflow
 
-load_dotenv(override=True)
+def clean_agent_thought(t: str) -> str:
+    """
+    Strips internal LLM scratchpad reasoning, ReAct thoughts, rules analysis,
+    and planning steps, ensuring only the genuine user-facing answer is delivered.
+    """
+    if not t or not isinstance(t, str):
+        return t
+    
+    clean = t.strip()
+
+    # 1. Standard ReAct Delimiter
+    if "Final Answer:" in clean:
+        clean = clean.split("Final Answer:", 1)[-1].strip()
+
+    # 2. Match 'Let's formulate...' transition and take everything after it
+    formulate_m = re.search(r'Let\'s\s+formulate[^\n]*?[\.\):]\s*(?=[✅⚠️ℹ️🩺\*\#A-Za-z])', clean, flags=re.IGNORECASE)
+    if formulate_m:
+        clean = clean[formulate_m.end():].strip()
+
+    # 3. Match general transition phrases: 'Here is the response...', 'Final response:'
+    trans_m = re.search(r'(?:Here\s+is\s+the\s+final|Final\s+Response:?|Final\s+Answer:?)[^\n]*\n*', clean, flags=re.IGNORECASE)
+    if trans_m:
+        clean = clean[trans_m.end():].strip()
+
+    # 4. If there is a status emoji (✅, ⚠️, ℹ️, 🩺) and preamble before it contains scratchpad/thought keywords
+    emoji_m = re.search(r'[\n\s]+([✅⚠️ℹ️🩺])', clean)
+    if emoji_m:
+        preamble = clean[:emoji_m.start()]
+        if any(w in preamble.lower() for w in ['rules', 'himes', 'architecture', 'policy', 'cash patient', 'thought', 'user mode', 'explain pannunga']):
+            clean = clean[emoji_m.start(1):].strip()
+
+    # 5. Strip any remaining Thought prefixes or rules analysis
+    clean = re.sub(
+        r'^(?:Thought:|[A-Za-z\s]+Thought:)?\s*(?:This based on|The user is asking|According to the rules|I should|Let me check)[\s\S]*?(?=(?:✅|⚠️|ℹ️|🩺|\*\*Appointment|\*\*Status|[A-Za-z0-9_-]+\s*screen|Intha|Indru|Inaikki|Aama|Illa|Vanakkam|Neenga|Hello|Hi))',
+        '',
+        clean,
+        flags=re.IGNORECASE
+    ).strip()
+    clean = re.sub(r'^Thought:\s*', '', clean, flags=re.IGNORECASE).strip()
+    return clean
 
 class AutonomousAgent:
     """
@@ -1144,8 +1183,7 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
 
             # Check if Agent reached Final Answer (with no pending Action)
             if "Final Answer:" in llm_response and "Action:" not in llm_response:
-                final_text = llm_response.split("Final Answer:", 1)[-1].strip()
-                final_text = re.sub(r"^Thought:\s*", "", final_text, flags=re.IGNORECASE).strip()
+                final_text = clean_agent_thought(llm_response)
                 full_reply = attach_formatted_sql_card(final_text)
 
                 # Cache in Valkey for 300s (5-minute TTL)
@@ -1210,20 +1248,7 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
 
             if not action:
                 if llm_response.strip():
-                    clean_reply = llm_response
-                    if "Final Answer:" in clean_reply:
-                        clean_reply = clean_reply.split("Final Answer:", 1)[-1].strip()
-                    else:
-                        # Model omitted explicit 'Final Answer:' marker and started with Thought/reasoning!
-                        # Strip thought preamble up to the actual user response or status card
-                        clean_reply = re.sub(
-                            r'^(?:Thought:)?\s*(?:The user is asking|According to the rules|I should|Let me check|Let\'s formulate)[\s\S]*?(?=(?:✅|⚠️|ℹ️|🩺|\*\*Appointment|\*\*Status|[A-Za-z0-9_-]+\s*screen|Intha|Indru|Inaikki|Aama|Illa|Vanakkam|Neenga|Hello|Hi))',
-                            '',
-                            clean_reply,
-                            flags=re.IGNORECASE
-                        ).strip()
-                        clean_reply = re.sub(r'^Let\'s formulate the final response[^\n]*\n*', '', clean_reply, flags=re.IGNORECASE).strip()
-                    clean_reply = re.sub(r"^Thought:\s*", "", clean_reply, flags=re.IGNORECASE).strip()
+                    clean_reply = clean_agent_thought(llm_response)
                     return {
                         "status": "success",
                         "reply": attach_formatted_sql_card(clean_reply),

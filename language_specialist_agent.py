@@ -208,16 +208,13 @@ class LanguageSpecialistAgent:
             return reply_text
 
         # Strip any internal Thought prefix or reasoning scratchpad before language checks
-        if 'Final Answer:' in reply_text:
-            reply_text = reply_text.split('Final Answer:', 1)[-1].strip()
-        reply_text = re.sub(
-            r'^(?:Thought:)?\s*(?:The user is asking|According to the rules|I should|Let me check|Let\'s formulate)[\s\S]*?(?=(?:✅|⚠️|ℹ️|🩺|\*\*Appointment|\*\*Status|[A-Za-z0-9_-]+\s*screen|Intha|Indru|Inaikki|Aama|Illa|Vanakkam|Neenga|Hello|Hi))',
-            '',
-            reply_text,
-            flags=re.IGNORECASE
-        ).strip()
-        reply_text = re.sub(r'^Let\'s formulate the final response[^\n]*\n*', '', reply_text, flags=re.IGNORECASE).strip()
-        reply_text = re.sub(r'^Thought:\s*', '', reply_text, flags=re.IGNORECASE).strip()
+        try:
+            from autonomous_agent import clean_agent_thought
+            reply_text = clean_agent_thought(reply_text)
+        except Exception:
+            if 'Final Answer:' in reply_text:
+                reply_text = reply_text.split('Final Answer:', 1)[-1].strip()
+            reply_text = re.sub(r'^Thought:\s*', '', reply_text, flags=re.IGNORECASE).strip()
 
         target_code = target_lang_info.get("language_code", "en")
         target_name = target_lang_info.get("language_name", "English")
