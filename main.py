@@ -598,11 +598,19 @@ def format_user_mode_response(reply: str) -> str:
 
     text = reply
 
-    # 0. Strip any internal Thought prefix or Final Answer prefix
-    text = re.sub(r'^Thought:\s*', '', text, flags=re.IGNORECASE).strip()
+    # 0. Strip any internal Thought prefix, rules reflection, or Final Answer prefix
     if 'Final Answer:' in text:
         text = text.split('Final Answer:', 1)[-1].strip()
-        text = re.sub(r'^Thought:\s*', '', text, flags=re.IGNORECASE).strip()
+
+    # Strip scratchpad thought blocks if Final Answer marker was omitted
+    text = re.sub(
+        r'^(?:Thought:)?\s*(?:The user is asking|According to the rules|I should|Let me check|Let\'s formulate)[\s\S]*?(?=(?:✅|⚠️|ℹ️|🩺|\*\*Appointment|\*\*Status|[A-Za-z0-9_-]+\s*screen|Intha|Indru|Inaikki|Aama|Illa|Vanakkam|Neenga|Hello|Hi))',
+        '',
+        text,
+        flags=re.IGNORECASE
+    ).strip()
+    text = re.sub(r'^Let\'s formulate the final response[^\n]*\n*', '', text, flags=re.IGNORECASE).strip()
+    text = re.sub(r'^Thought:\s*', '', text, flags=re.IGNORECASE).strip()
 
     # In USER MODE: Completely remove all technical <details>...</details> and <summary>...</summary> accordions
     text = re.sub(r'<details[\s\S]*?</details>', '', text, flags=re.IGNORECASE).strip()

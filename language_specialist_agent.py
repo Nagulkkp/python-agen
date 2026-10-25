@@ -207,6 +207,18 @@ class LanguageSpecialistAgent:
         if not reply_text or not isinstance(reply_text, str):
             return reply_text
 
+        # Strip any internal Thought prefix or reasoning scratchpad before language checks
+        if 'Final Answer:' in reply_text:
+            reply_text = reply_text.split('Final Answer:', 1)[-1].strip()
+        reply_text = re.sub(
+            r'^(?:Thought:)?\s*(?:The user is asking|According to the rules|I should|Let me check|Let\'s formulate)[\s\S]*?(?=(?:✅|⚠️|ℹ️|🩺|\*\*Appointment|\*\*Status|[A-Za-z0-9_-]+\s*screen|Intha|Indru|Inaikki|Aama|Illa|Vanakkam|Neenga|Hello|Hi))',
+            '',
+            reply_text,
+            flags=re.IGNORECASE
+        ).strip()
+        reply_text = re.sub(r'^Let\'s formulate the final response[^\n]*\n*', '', reply_text, flags=re.IGNORECASE).strip()
+        reply_text = re.sub(r'^Thought:\s*', '', reply_text, flags=re.IGNORECASE).strip()
+
         target_code = target_lang_info.get("language_code", "en")
         target_name = target_lang_info.get("language_name", "English")
 

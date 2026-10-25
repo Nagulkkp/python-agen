@@ -887,8 +887,12 @@ Thought: <what I need to investigate or do next>
 Action: <one of the tool names above>
 Action Input: <valid JSON object containing arguments for that tool>
 
-When you have completed all actions and have the live result, output:
+When you have completed all actions and have the live result (or if you already know the answer and do not need any tools), output IMMEDIATELY:
 Final Answer: <Your clear, factual response strictly in the USER'S EXACT LANGUAGE (English if asked in English, Tanglish if asked in Tanglish, Tamil if asked in Tamil)>
+
+CRITICAL GUARDRAIL:
+- NEVER output raw internal thinking, planning steps, or rules review (e.g. 'The user is asking in Tanglish...', 'According to the rules...', 'Let's formulate the final response...') to the user!
+- Everything you output after `Final Answer:` is shown directly to the user in their language.
 """
 
         is_dev_mode = bool((context or {}).get("is_developer_mode", False))
@@ -1209,6 +1213,16 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
                     clean_reply = llm_response
                     if "Final Answer:" in clean_reply:
                         clean_reply = clean_reply.split("Final Answer:", 1)[-1].strip()
+                    else:
+                        # Model omitted explicit 'Final Answer:' marker and started with Thought/reasoning!
+                        # Strip thought preamble up to the actual user response or status card
+                        clean_reply = re.sub(
+                            r'^(?:Thought:)?\s*(?:The user is asking|According to the rules|I should|Let me check|Let\'s formulate)[\s\S]*?(?=(?:✅|⚠️|ℹ️|🩺|\*\*Appointment|\*\*Status|[A-Za-z0-9_-]+\s*screen|Intha|Indru|Inaikki|Aama|Illa|Vanakkam|Neenga|Hello|Hi))',
+                            '',
+                            clean_reply,
+                            flags=re.IGNORECASE
+                        ).strip()
+                        clean_reply = re.sub(r'^Let\'s formulate the final response[^\n]*\n*', '', clean_reply, flags=re.IGNORECASE).strip()
                     clean_reply = re.sub(r"^Thought:\s*", "", clean_reply, flags=re.IGNORECASE).strip()
                     return {
                         "status": "success",
