@@ -290,14 +290,16 @@ class ValkeyHimesManager:
     # 2C. SHA256 EPHEMERAL QUERY CACHING (300-SECOND / 5-MINUTE TTL)
     # ----------------------------------------------------------------------
     @staticmethod
-    def generate_query_hash(user_query: str, active_mrn: str = "", session_id: str = "") -> str:
+    def generate_query_hash(user_query: str, active_mrn: str = "", session_id: str = "", mode: str = "user") -> str:
         """
-        Generates a deterministic SHA256 hash key from user_query, active_mrn, and session_id.
+        Generates a deterministic SHA256 hash key from user_query, active_mrn, session_id, and mode.
+        Ensures User Mode responses and Developer Mode responses are strictly isolated in cache!
         """
         norm_query = re.sub(r'\s+', ' ', (user_query or "").strip().lower())
         norm_mrn = str(active_mrn or "").strip().lower()
         norm_session = str(session_id or "").strip().lower()
-        combined = f"{norm_query}|{norm_mrn}|{norm_session}"
+        norm_mode = str(mode or "user").strip().lower()
+        combined = f"{norm_query}|{norm_mrn}|{norm_session}|{norm_mode}"
         return hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
     def cache_ephemeral_query(
@@ -307,13 +309,14 @@ class ValkeyHimesManager:
         session_id: str = "",
         formatted_response: str = "",
         executed_sql: str = "",
-        ttl: int = 300
+        ttl: int = 300,
+        mode: str = "user"
     ) -> str:
         """
         Caches formatted response and SQL payload in Valkey with a 300-second (5-minute) TTL
         using the SHA256 hash key: `himes:ephemeral:query:{sha256}`.
         """
-        q_hash = self.generate_query_hash(user_query, active_mrn, session_id)
+        q_hash = self.generate_query_hash(user_query, active_mrn, session_id, mode=mode)
         cache_key = f"himes:ephemeral:query:{q_hash}"
         payload = {
             "formatted_response": formatted_response,
@@ -322,6 +325,7 @@ class ValkeyHimesManager:
             "user_query": user_query,
             "mrn": active_mrn,
             "session_id": session_id,
+            "mode": mode,
             "ttl": ttl
         }
         self._set(cache_key, payload, ttl=ttl)
@@ -331,13 +335,14 @@ class ValkeyHimesManager:
         self,
         user_query: str,
         active_mrn: str = "",
-        session_id: str = ""
+        session_id: str = "",
+        mode: str = "user"
     ) -> Optional[Dict[str, Any]]:
         """
         Retrieves cached response and SQL payload if present within 300-second TTL.
         Returns dict with keys: formatted_response, executed_sql, or None if expired/missing.
         """
-        q_hash = self.generate_query_hash(user_query, active_mrn, session_id)
+        q_hash = self.generate_query_hash(user_query, active_mrn, session_id, mode=mode)
         cache_key = f"himes:ephemeral:query:{q_hash}"
         return self._get(cache_key)
 

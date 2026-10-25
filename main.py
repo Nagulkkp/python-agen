@@ -604,19 +604,22 @@ def format_user_mode_response(reply: str) -> str:
         text = text.split('Final Answer:', 1)[-1].strip()
         text = re.sub(r'^Thought:\s*', '', text, flags=re.IGNORECASE).strip()
 
-    # Protect interactive <details>...</details> accordions (View Generated SQL Query / Tables)
-    details_stash = []
-    def stash_details(m):
-        idx = len(details_stash)
-        details_stash.append(m.group(0))
-        return f"__HIMES_ACCORDION_STASH_{idx}__"
+    # In USER MODE: Completely remove all technical <details>...</details> and <summary>...</summary> accordions
+    text = re.sub(r'<details[\s\S]*?</details>', '', text, flags=re.IGNORECASE).strip()
+    text = re.sub(r'<summary[\s\S]*?</summary>', '', text, flags=re.IGNORECASE).strip()
+    text = re.sub(r'<\/?(?:details|summary|b|strong)>', '', text, flags=re.IGNORECASE).strip()
 
-    text = re.sub(r'<details[\s\S]*?</details>', stash_details, text, flags=re.IGNORECASE)
+    # 1. Remove raw SQL code blocks, headers, and UI code card artifacts
+    text = re.sub(r'```(?:sql)?[\s\S]*?```', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^\s*Details\s*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(r'(?:🔍\s*)?View\s+Generated\s+SQL\s+Query[^\n]*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'(?:Live\s+MSSQL\s+Query\s+Executed|SQL\s+Query\s+Executed|Executed\s+SQL)[:\s]*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^\s*(?:SQL|Copy)\s*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
 
-    # 1. Replace raw naked SQL code blocks (OUTSIDE of details accordions) with verified status card
+    # 1b. Remove any un-fenced raw SELECT queries
     text = re.sub(
-        r'```(?:sql)?[\s\S]*?(?:SELECT|FROM|WHERE|JOIN|INSERT|UPDATE)[\s\S]*?```',
-        '> ✅ **Database Verification:** Verified directly with live hospital database records.',
+        r'\bSELECT\s+(?:DISTINCT\s+)?(?:TOP\s+\d+\s+)?[a-zA-Z0-9_\.,\s\(\)\'\=\<\>\-]+?\s+FROM\s+[a-zA-Z0-9_]+[\s\S]*?(?:ORDER\s+BY\s+[^\n]+|;|\n\n|\Z)',
+        '',
         text,
         flags=re.IGNORECASE
     )
@@ -641,7 +644,7 @@ def format_user_mode_response(reply: str) -> str:
         text
     )
 
-    # 4. Remove / mask technical file paths (outside of stashed details)
+    # 4. Remove / mask technical file paths
     text = re.sub(
         r'(?:/L9/nagul/himes-ai/|/var/www/html/himes-ai/|app/Http/Controllers/|app/|routes/|resources/views/)[a-zA-Z0-9_\-/\.]+',
         'HIMES Core System',
@@ -654,15 +657,26 @@ def format_user_mode_response(reply: str) -> str:
     )
 
     # 5. Remove technical controller, route, and table lines from fast-paths
-    text = re.sub(r'• \*\*Primary Controller:\*\* `.*?`\n?', '', text)
-    text = re.sub(r'• \*\*Controller:\*\* `.*?`\n?', '', text)
-    text = re.sub(r'• \*\*Route Path:\*\* `.*?`\n?', '', text)
-    text = re.sub(r'• \*\*Route / URL:\*\* `.*?`\n?', '', text)
-    text = re.sub(r'• \*\*Function ID:\*\* `.*?`\n?', '', text)
-    text = re.sub(r'\*\*Associated SQL Tables:\*\*\s*\n`.*?`\n*', '', text)
-    text = re.sub(r'\*\*Key SQL Tables:\*\*\s*\n`.*?`\n*', '', text)
+    text = re.sub(r'•\s*\*?\*?Primary Controller:\*?\*?\s*`?.*?`?\n?', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'•\s*\*?\*?Controller:\*?\*?\s*`?.*?`?\n?', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'•\s*\*?\*?Route Path:\*?\*?\s*`?.*?`?\n?', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'•\s*\*?\*?Route / URL:\*?\*?\s*`?.*?`?\n?', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'•\s*\*?\*?Function ID:\*?\*?\s*`?.*?`?\n?', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\*?\*?Associated SQL Tables:\*?\*?\s*\n`?.*?`?\n*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\*?\*?Key SQL Tables:\*?\*?\s*\n`?.*?`?\n*', '', text, flags=re.IGNORECASE)
 
-    # 5b. User Mode: Mask raw SQL table names, primary keys, and cron names with intuitive healthcare terms
+    # 5b. Strip database IP addresses, database sources, and query footers (with or without asterisks/bullets)
+    text = re.sub(r'•?\s*\*?\*?Database Source:\*?\*?.*?(?:\n|$)', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'•?\s*\*?\*?Tables Queried:\*?\*?.*?(?:\n|$)', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\*?\(?⚡\s*Real-Time\s+Live\s+MSSQL\s+Execution.*?(?:\)\*?|\n|$)', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\b192\.168\.\d+\.\d+\b', '', text)
+
+    # 5c. Strip raw URL routes and parentheticals like (/Appointment Calendar Scheduler)
+    text = re.sub(r'\(\s*/[A-Za-z0-9_\-\s/]+\s*\)', '', text)
+    text = re.sub(r'\(\s*/?[A-Za-z0-9_\-\s/]*(?:Scheduler|Registration|Panel|Controller|routes)[A-Za-z0-9_\-\s/]*\)', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'/(?:viewQuickRegistration|patientRegistration|appointmentScheduler|AppointmentCalendarScheduler|emrVisitEntryPanel)\b', '', text, flags=re.IGNORECASE)
+
+    # 5d. User Mode: Mask raw SQL table names, primary keys, and cron names with intuitive healthcare terms
     table_replacements = [
         (r'\bResource_Parent\s*\([^)]*\)', 'Doctor / Healthcare Provider'),
         (r'`?Resource_Parent`?', 'Doctor Roster'),
@@ -699,11 +713,7 @@ def format_user_mode_response(reply: str) -> str:
     for pattern, repl in table_replacements:
         text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
 
-    # 6. Restore protected <details> accordions intact so raw SQL query is visible upon expanding
-    for idx, block in enumerate(details_stash):
-        text = text.replace(f"__HIMES_ACCORDION_STASH_{idx}__", block)
-
-    # 7. Ensure clean spacing
+    # 6. Ensure clean spacing and remove residual empty lines
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
     return text
 
@@ -1431,13 +1441,17 @@ def chat_with_agent(payload: ChatRequest):
                             }
                         )
 
-        # 2. Check ChromaDB Semantic Cache (distance <= 0.30)
         # Healthcare Privacy & Real-Time Data Freshness Guardrail: NEVER cache patient, encounter, or clinical PHI!
         is_patient_query = bool(v_m or m_m) or is_patient_or_phi_data(payload.message)
         is_followup = not is_patient_query and bool(sess["active_entities"].get("visit_no") or sess["active_entities"].get("mrn"))
+        is_live_or_dynamic_query = is_patient_query or any(w in msg_lower for w in [
+            "available", "availability", "today", "tomorrow", "yesterday", "inaikki", "inikku", "nethu", "naalaikku",
+            "doctor available", "slot", "slots", "schedule", "leave", "leaves", "who is on duty", "duty",
+            "entha doctor", "who is available", "appointment"
+        ])
         
-        # Grounding & PHI Rule: Only check semantic cache for static system/menu queries
-        if not is_followup and not is_patient_query:
+        # Grounding & PHI Rule: Only check semantic cache for static system/workflow knowledge
+        if not is_followup and not is_live_or_dynamic_query:
             cached_result = check_semantic_cache(payload.message, threshold=0.30)
             if cached_result:
                 c_answer = cached_result["answer"]
@@ -1518,12 +1532,16 @@ def chat_with_agent(payload: ChatRequest):
             reply_text = format_user_mode_response(reply_text)
         elif current_mode == "developer" and actions_taken:
             # Append structured developer diagnostics if not already present in response
-            queries_run = [a for a in actions_taken if a.get("action") == "execute_select_sql"]
+            queries_run = [
+                a for a in actions_taken
+                if a.get("action") == "execute_select_sql" or a.get("tool") == "execute_select_sql"
+            ]
             if queries_run and "```sql" not in reply_text:
                 tech_details = "\n\n### 💻 Developer Diagnostics\n**Executed SQL Queries:**\n"
                 for q in queries_run[:3]:
-                    sql_text = q.get("input", {}).get("sql_query", "")
-                    tech_details += f"```sql\n{sql_text}\n```\n"
+                    sql_text = q.get("input", {}).get("sql_query") or q.get("args", {}).get("sql_query", "")
+                    if sql_text:
+                        tech_details += f"```sql\n{sql_text}\n```\n"
                 cache_info = f"• **Session Mode Key:** `chat_session:{payload.session_id}:mode` (developer)\n• **Valkey Session:** Active\n• **Specialist Agent:** `{specialist_name}`\n"
                 tech_details += f"**Cache & State Store:**\n{cache_info}"
                 reply_text += tech_details
@@ -1531,13 +1549,17 @@ def chat_with_agent(payload: ChatRequest):
         # Strict Multi-Lingual & Tanglish Language Mirroring via Language Specialist Agent
         reply_text = language_specialist.mirror_reply(reply_text, user_lang)
 
+        # Enforce User Mode clean formatting after language mirroring
+        if current_mode == "user":
+            reply_text = format_user_mode_response(reply_text)
+
         # Update session memory
         update_session_memory(payload.session_id, payload.message, reply_text, user_id=payload.user_id)
         valkey_manager.update_session_entities(payload.session_id, sess["active_entities"])
 
 
-        # 4. Save into ChromaDB Semantic Cache (STRICTLY PROHIBITED for patient/visit data)
-        if not is_followup and not is_patient_query and not is_patient_or_phi_data(payload.message, reply_text):
+        # 4. Save into ChromaDB Semantic Cache (STRICTLY PROHIBITED for dynamic availability, transactions, or PHI)
+        if not is_followup and not is_live_or_dynamic_query and not is_patient_or_phi_data(payload.message, reply_text):
             save_to_semantic_cache(payload.message, reply_text)
 
         return ChatResponse(

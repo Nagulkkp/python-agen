@@ -637,6 +637,32 @@ HIMES ARCHITECTURE & DATABASE SCHEMA GUIDANCE:
         - NEVER use hardcoded or guessed numbers; report only verified rows returned by the live database!
   * When searching for an MRN:
     - ALWAYS check BOTH `patient_basic_details` (general hospital MRNs) AND `Pharmacy_Patient_Basic_Details` (for Pharmacy MRNs starting with PHAR)!
+- DOCTOR ROSTER, AVAILABILITY & APPOINTMENT SCHEDULING:
+  * Table: `Resource_Parent` (Doctor Master)
+    - Primary Key: `Resource_Parent_Serial_No`
+    - Doctor Name: `Resource_Name` (e.g. 'DR ADEL QUTTAINAH', 'DR. AHMED')
+    - Specialty Code: `Default_Speciality_Code` (e.g. 'GS', 'GP', 'ANES', 'DERM')
+    - Flags: `Active_Status = 'A'` AND `Show_In_Appointment = 'Y'` AND `Is_Resource_Human = 'Y'`
+  * Table: `Resource_Non_Availability` (Doctor Leaves, Breaks, Conference Blocks)
+    - `Resource_Parent_Serial_No`
+    - Date Filters: `Resource_Non_Availability_Start_Date_Time` and `Resource_Non_Availability_End_Date_Time`
+    - Status: `Active_Status = 'A'`
+  * Standard Query to find Today's Available Doctors:
+    ```sql
+    SELECT DISTINCT TOP 15
+        rp.Resource_Parent_Serial_No,
+        rp.Resource_Name AS Doctor_Name,
+        rp.Default_Speciality_Code AS Speciality,
+        CASE WHEN EXISTS (
+            SELECT 1 FROM Resource_Non_Availability rna WITH(NOLOCK)
+            WHERE rna.Resource_Parent_Serial_No = rp.Resource_Parent_Serial_No
+              AND CAST(GETDATE() AS DATE) BETWEEN CAST(rna.Resource_Non_Availability_Start_Date_Time AS DATE) AND CAST(rna.Resource_Non_Availability_End_Date_Time AS DATE)
+              AND rna.Active_Status = 'A'
+        ) THEN 'On Leave' ELSE 'Available' END AS Doctor_Status
+    FROM Resource_Parent rp WITH(NOLOCK)
+    WHERE rp.Active_Status = 'A' AND rp.Show_In_Appointment = 'Y'
+    ORDER BY rp.Resource_Name
+    ```
 
 - LABORATORY (LIS) & RADIOLOGY (RIS) WORKFLOWS:
   * LIS (Lab Orders & Results):
@@ -895,16 +921,17 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
 - STRICT PROHIBITIONS (END-USER AUDIENCE):
   • NO raw database table names (NEVER mention tables like Patient_Appointment, Resource_Parent, Resource_Non_Availability, Patient_Visit_Basic_Details, Patient_Basic_Details, Appointment_Status_Type, etc.)!
   • NO raw column names or primary keys (do NOT mention Patient_Appointment_Serial_No, Resource_Parent_Serial_No, etc. - refer to them in plain business terms as 'Appointment Reference', 'Visit No', 'MRN Number')!
+  • NO raw SQL queries or database connection metadata (NEVER output SELECT statements, SQL accordions, database IP addresses 192.168.x.x, or 'Tables Queried' lists in User View - those belong strictly in Developer Mode)!
+  • NO raw URL route paths or slashes (do NOT write '/appointmentScheduler', '/viewQuickRegistration', '/patientRegistration', etc. - refer to screens by their clean UI name: 'Appointment Scheduler screen', 'Patient Registration screen', 'Quick Registration screen')!
   • NO PHP controller names or class names (NEVER mention QuickDemoRegController, QuickRegistrationController, RegistrationTabController, or any Controller.php - refer to them as 'Patient Registration Screen', 'Quick Registration Desk', 'Front Desk', etc.)!
   • NO backend request parameters or query strings (NEVER mention 'replicate=1', GET/POST parameters, API payloads, or database inserts)!
   • NO background cron job names or internal script names (do NOT mention AppointmentUpdateNoShow, ReportScheduleCron, etc.)!
   • NO file paths (do NOT mention /L9/nagul/himes-ai, app/Http/Controllers/..., routes/routes.php, etc.)
   • NO raw code snippets (no PHP, JS, or shell scripts)
-  • NO database query logs (do NOT output raw SELECT SQL statements)
   • NO technical error stack traces or framework internals
   • Speak ONLY in clean, intuitive, hospital business and UI screen navigation language (e.g. Doctor Roster, Doctor Leaves & Breaks, Slot Booking, Appointment Status Tracking, Front-Desk Visit Registration, Doctor Queue Token)!
   • When the user asks where an option or feature is located (e.g. 'replicate option enga irukum'):
-    -> Explain the visual screen navigation clearly for the hospital staff (e.g., 'Patient Registration screen-la Visit Details tab / section-la Replicate Previous Visit option irukkum; atha click panna last visit insurance, services, diagnosis auto-populate aagidum'). Do NOT explain backend controllers or parameters!
+    -> Explain the visual screen navigation clearly for the hospital staff (e.g., 'Patient Registration screen-la Visit Details tab / section-la Replicate Previous Visit option irukkum; atha click panna last visit insurance, services, diagnosis auto-populate aagidum'). Do NOT explain backend controllers, parameters, or route URLs!
 - VISUAL LAYOUT & PRESENTATION:
   • Return responses structured with clean Markdown and status cards:
     - ✅ Green checkmark status cards for confirmed data / success (e.g. ✅ **Status:** Confirmed / Billed)
@@ -1000,7 +1027,8 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
         if not image_parts:
             try:
                 from valkey_himes_manager import valkey_manager
-                cached_query = valkey_manager.get_ephemeral_query(user_task, active_mrn=active_mrn, session_id=session_id)
+                active_mode_str = "developer" if is_dev_mode else "user"
+                cached_query = valkey_manager.get_ephemeral_query(user_task, active_mrn=active_mrn, session_id=session_id, mode=active_mode_str)
                 if cached_query and isinstance(cached_query, dict):
                     cached_reply = cached_query.get("formatted_response") or ""
                     cached_sql = cached_query.get("executed_sql") or ""
@@ -1016,10 +1044,6 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
                         }
             except Exception as ve:
                 print(f"[ValkeyCache] Notice: {ve}")
-
-        def attach_formatted_sql_card(text: str) -> str:
-            if not last_sql_query:
-                return text
 
         def _build_sql_accordion(sql_str: str) -> str:
             clean_sql = sql_str.strip()
@@ -1038,6 +1062,10 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
             )
 
         def attach_formatted_sql_card(text: str) -> str:
+            # IN USER VIEW: STRICTLY NEVER ATTACH SQL ACCORDIONS, RAW QUERIES, OR DATABASE HOSTS!
+            if not is_dev_mode:
+                return text
+
             if not last_sql_query:
                 return text
 
@@ -1048,7 +1076,7 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
             has_table = ("| ---" in text or "| :---" in text or "|:---" in text or "|---" in text)
 
             if has_table:
-                # LLM already rendered the records cleanly; attach informative collapsible SQL accordion
+                # LLM already rendered the records cleanly; attach informative collapsible SQL accordion in Developer Mode
                 return f"{text}{_build_sql_accordion(last_sql_query)}"
 
             # If the user did NOT explicitly ask for billing/services breakdown,
@@ -1070,15 +1098,14 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
                             "visit_no": active_visit,
                             "executed_sql": last_sql_query
                         },
-                        mode="developer" if is_dev_mode else "user"
+                        mode="developer"
                     )
                     if formatted_card:
                         return f"{text}\n\n{formatted_card}"
                 except Exception as fe:
                     print(f"[TableFormatter] notice: {fe}")
             else:
-                # For other general queries (e.g. today's visits, patient list),
-                # attach the collapsible SQL accordion with exact query and table source
+                # In Developer Mode: attach the collapsible SQL accordion with exact query and table source
                 return f"{text}{_build_sql_accordion(last_sql_query)}"
 
             return text
@@ -1120,13 +1147,15 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
                 # Cache in Valkey for 300s (5-minute TTL)
                 try:
                     from valkey_himes_manager import valkey_manager
+                    active_mode_str = "developer" if is_dev_mode else "user"
                     valkey_manager.cache_ephemeral_query(
                         user_task,
                         active_mrn=active_mrn,
                         session_id=session_id,
                         formatted_response=full_reply,
                         executed_sql=last_sql_query or "",
-                        ttl=300
+                        ttl=300,
+                        mode=active_mode_str
                     )
                 except Exception as ce:
                     print(f"[ValkeyCache] Save notice: {ce}")
