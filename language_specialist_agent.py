@@ -219,11 +219,22 @@ class LanguageSpecialistAgent:
         target_code = target_lang_info.get("language_code", "en")
         target_name = target_lang_info.get("language_name", "English")
 
-        # 1. Quick check: If target is English, does the text contain Tanglish words?
+        # 1. Quick check: If target is English, does the text contain any Tanglish or Tamil words?
         if target_code == "en":
-            tanglish_tokens = ["aamaanga", "nethu", "irukku", "eduthirukaanga", "pannirukaanga", "pannala", "solren", "paathukonga", "kidaikala", "theriyum"]
-            has_tanglish_leak = any(w in reply_text.lower() for w in tanglish_tokens)
-            if not has_tanglish_leak:
+            tanglish_markers = [
+                r"\biruk(?:ku|ka|kum|kura|ken|kom|kanga|kaanga|kunu|kanum)?\b",
+                r"\bpann(?:u|a|i|ren|ra|ran|ranga|ala|unga|itta|itten|idalam|iruk\w*)\b",
+                r"\baamaanga\b", r"\baama\b", r"\billa\b", r"\billai\b", r"\billana\b",
+                r"\bavang(?:a|al|alukku|aloda)\b", r"\bneeng(?:a|al|alukku)\b",
+                r"\bnethu\b", r"\binnaiku\b", r"\binaikki\b", r"\btheri(?:yum|um|yuma)\b",
+                r"\bmudi(?:yum|um|yuma|yaathu|yathu)\b", r"\bsoll(?:u|unga|ren)\b",
+                r"\bkaat(?:tu|tunga)\b", r"\bpaath(?:u|ukonga)\b", r"\bkod(?:u|unga)\b",
+                r"\bandha\b", r"\bindha\b", r"\bappuram\b", r"\bpadi\b", r"\bthaan\b",
+                r"\bkooda\b", r"\bvenum\b", r"\bvenam\b", r"\bpod(?:u|a|i|ren|ra)\b"
+            ]
+            has_tanglish_leak = any(re.search(pat, reply_text, re.IGNORECASE) for pat in tanglish_markers)
+            has_tamil_script = bool(re.search(r"[\u0B80-\u0BFF]", reply_text))
+            if not has_tanglish_leak and not has_tamil_script:
                 return reply_text  # Already clean English!
 
         # 2. Quick check: If target is Tanglish, does the text contain Pure Tamil script or is it already natural Tanglish?
