@@ -41,7 +41,8 @@ from semantic_cache import (
     check_semantic_cache,
     save_to_semantic_cache,
     enforce_safety_rules,
-    is_patient_or_phi_data
+    is_patient_or_phi_data,
+    verify_answer_relevance
 )
 from valkey_himes_manager import (
     valkey_manager,

@@ -217,6 +217,73 @@ def extract_entity_numbers(query: str) -> set:
     return set(re.findall(r'\b\d{4,}\b', query))
 
 
+def verify_answer_relevance(user_query: str, candidate_answer: str) -> bool:
+    """
+    CRITICAL ANSWER-RELEVANCE VERIFICATION GUARDRAIL:
+    Verifies that a candidate answer retrieved from Valkey or ChromaDB
+    actually and specifically answers the user's inquiry before returning.
+
+    Rejection Criteria:
+    1. Empty answer or placeholder error.
+    2. Generic Header / Summary Rejection: If user asks a specific question (e.g. contains
+       'allow', 'mudiyuma', 'pannuma', 'can', 'how', 'why', 'revert', 'cancel', 'multiple', etc.)
+       but candidate answer is merely a high-level title/overview without addressing the specific action.
+    3. Keyword Alignment: If query contains distinct domain keywords (e.g. 'multiple', 'revert',
+       'credit note', 'deposit', 'prior approval'), candidate answer MUST contain or address
+       those key concepts.
+    4. Capability / Yes-No Check: If query asks if something is allowed ('allow', 'mudiyuma', 'can we'),
+       the answer must take a clear affirmative or negative stance ('yes', 'no', 'aama', 'illai',
+       'allow', 'permit', 'blocked', 'mudiyaathu', 'mudiyum').
+    """
+    if not candidate_answer or not str(candidate_answer).strip():
+        return False
+
+    q_lower = user_query.lower()
+    a_lower = candidate_answer.lower()
+
+    # 1. Reject generic module card dumps when user asks a question
+    question_markers = [
+        "allow", "mudiyuma", "mudium", "mudiyadhu", "pannuma", "pannalama", "pannalam",
+        "can ", "can i", "can we", "is it possible", "how to", "how do", "why", "what happens",
+        "epdi", "eppadi", "enna aagum", "revert", "cancel", "multiple", "refund", "receipt",
+        "short payment", "discount", "advance", "deposit", "copay", "co-pay", "vat", "thevai", "thevaiya"
+    ]
+    is_question = any(w in q_lower for w in question_markers)
+    if is_question:
+        # If candidate answer is just a static overview stub
+        if "hospital workflows:" in a_lower and ("standard process verified" in a_lower or "senior architect guide covering" in a_lower):
+            return False
+        if len(a_lower.split()) < 8 and any(w in a_lower for w in ["guide", "system", "overview", "lifecycle"]):
+            return False
+
+    # 2. Check topical keyword presence if query has specialized terms
+    specialized_topics = [
+        ("multiple", ["multiple", "several", "more than one", "second invoice", "subsequent", "partial", "pend"]),
+        ("revert", ["revert", "reopening", "unlock", "open"]),
+        ("cancel", ["cancel", "cancellation", "void"]),
+        ("refund", ["refund", "excess", "wallet", "credit note"]),
+        ("deposit", ["deposit", "advance", "adjusted", "balance"]),
+        ("copay", ["copay", "co-pay", "deductible", "coinsurance", "patient share"]),
+        ("vat", ["vat", "tax", "trn"]),
+        ("prior approval", ["prior approval", "pre-auth", "preauth", "authorization", "approval"])
+    ]
+    for topic, synonyms in specialized_topics:
+        if topic in q_lower:
+            if not any(s in a_lower for s in synonyms):
+                return False
+
+    # 3. If query asks 'allow' or capability, check for stance
+    if any(w in q_lower for w in ["allow", "mudiyuma", "mudium", "pannuma", "can we", "is it possible"]):
+        capability_words = [
+            "allow", "yes", "no", "aama", "illai", "mudiyum", "mudiyaathu", "possible", "impossible",
+            "permitted", "blocked", "supported", "cannot", "can "
+        ]
+        if not any(w in a_lower for w in capability_words):
+            return False
+
+    return True
+
+
 # ----------------------------------------------------------------------
 # 4b. HEALTHCARE PATIENT DATA PRIVACY (PHI) & LIVE DB GUARDRAILS
 # ----------------------------------------------------------------------
@@ -363,6 +430,11 @@ def check_semantic_cache(user_query: str, threshold: float = 0.25) -> Optional[D
                 # Double-check cached answer does not contain PHI
                 if is_patient_or_phi_data(matched_query, cached_answer):
                     print(f"[CACHE PURGE ON HIT] Cached item contains PHI. Invalidating cache hit.")
+                    return None
+
+                # 4. Critical Answer-Relevance & Match Verification Guardrail:
+                if not verify_answer_relevance(user_query, cached_answer):
+                    print(f"[CACHE REJECTED - RELEVANCE MISMATCH] Cached answer does not specifically answer '{user_query}'. Bypassing cache to query reasoning engine.")
                     return None
 
                 print(f"[CACHE HIT] Distance: {best_distance:.4f} (< {threshold}) | Matched: \"{matched_query}\"")

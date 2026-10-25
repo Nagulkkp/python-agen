@@ -881,9 +881,19 @@ HIMES ARCHITECTURE & DATABASE SCHEMA GUIDANCE:
        GROUP BY vet.Visit_Encounter_Type_Code, vet.Visit_Encounter_Type_Description
        ```
 
-- Best Strategy for Queries:
-  1. Formulate the exact SELECT query based on the core tables above.
-  3. State the factual answers (e.g. Patient Name, Bill No, Net Amount, Billed status, Deposit status, UI Receipt No, Receipt Amount, Active Services, Inventory Item prices, and Bed rates) clearly in the USER'S EXACT LANGUAGE (English if asked in English, Tanglish if asked in Tanglish).
+- Best Strategy for Queries & Knowledge Responses:
+  1. Formulate the exact SELECT query based on the core tables above for transactional queries.
+  2. For architectural/workflow questions (billing, registration, appointment, insurance, clinical SOPs):
+     Consult Valkey In-Memory flows and ChromaDB skills to provide authoritative, accurate explanations.
+  3. SELF-VERIFICATION & ANSWER-MATCH MANDATE:
+     * BEFORE delivering your Final Answer, perform an exact answer-match verification:
+       Does this response DIRECTLY and SPECIFICALLY answer the user's actual question?
+     * If the user asks whether a feature or action is allowed ("allow pannuma?", "can we do X?", "is it possible?", "revert panna mudiyuma?"):
+       - Your VERY FIRST sentence MUST give a clear, direct stance:
+         e.g. "Aama, HIMES billing module-la multiple invoices allow pannum..." or "No, once posted to claims it is permanently locked...".
+       - Then provide the concrete workflow, pending queue mechanics, or reason.
+     * NEVER output a generic module overview, documentation header, or list of tables when the user asks a specific functional question!
+  4. State the factual answers clearly in the USER'S EXACT LANGUAGE (English if asked in English, Tanglish if asked in Tanglish).
 
 CONVERSATION CONTINUITY & CONTEXT INHERITANCE:
 - Check ACTIVE APPLICATION SCREEN in Context!
@@ -1248,20 +1258,22 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
             thought = thought_match.group(1).strip() if thought_match else ""
 
             action, raw_input = None, "{}"
-            action_match = re.search(r"Action:\s*([a-zA-Z0-9_]+)", llm_response, re.IGNORECASE)
+            action_match = re.search(r"Action:\s*([<a-zA-Z0-9_>]+)", llm_response, re.IGNORECASE)
             if action_match:
-                action = action_match.group(1).strip()
-                after_action = llm_response[action_match.end():].strip()
+                candidate_action = action_match.group(1).strip()
+                if candidate_action.lower() not in ["none", "<none>", "null", "no_action"]:
+                    action = candidate_action
+                    after_action = llm_response[action_match.end():].strip()
 
-                # Extract JSON block between first { and last }
-                fb = after_action.find("{")
-                lb = after_action.rfind("}")
-                if fb != -1 and lb != -1 and lb > fb:
-                    raw_input = after_action[fb:lb+1].strip()
-                elif "Action" in llm_response and "Input:" in llm_response:
-                    input_split = re.split(r"Action\s*Input:\s*", llm_response, flags=re.IGNORECASE)
-                    if len(input_split) > 1:
-                        raw_input = input_split[-1].strip()
+                    # Extract JSON block between first { and last }
+                    fb = after_action.find("{")
+                    lb = after_action.rfind("}")
+                    if fb != -1 and lb != -1 and lb > fb:
+                        raw_input = after_action[fb:lb+1].strip()
+                    elif "Action" in llm_response and "Input:" in llm_response:
+                        input_split = re.split(r"Action\s*Input:\s*", llm_response, flags=re.IGNORECASE)
+                        if len(input_split) > 1:
+                            raw_input = input_split[-1].strip()
 
             # Dynamic SQL Interception: If model formulated SQL in thought without Action wrapper
             if not action:
@@ -1279,6 +1291,15 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
                         raw_input = json.dumps({"sql_query": candidate_sql})
 
             if not action:
+                # Check if this is a meta-thought or empty action declaration rather than a real answer
+                is_meta_scratchpad = any(llm_response.strip().lower().startswith(p) for p in [
+                    "i need to", "i will", "i should", "let me", "action: none", "action: <none>", "action: <none"
+                ]) or ("action: <none>" in llm_response.lower()) or ("action: none" in llm_response.lower())
+                
+                if is_meta_scratchpad and step < max_iterations - 1:
+                    history.append(f"{llm_response}\nObservation: No database tool or code search needed. Please formulate your complete, detailed Final Answer for the user starting with: Final Answer: <your full explanation>")
+                    continue
+
                 if llm_response.strip():
                     clean_reply = clean_agent_thought(llm_response)
                     return {
@@ -1290,7 +1311,7 @@ DUAL RESPONSE SYSTEM MODE: 👤 USER VIEW (DEFAULT - CLEAN & END-USER FRIENDLY)
                         "executed_sql": last_sql_query
                     }
                 else:
-                    history.append("System: Empty response received. Please decide your next Action or provide Final Answer.")
+                    history.append("System: Empty response received. Please formulate your response starting with Final Answer: <your explanation>")
                     continue
 
             # Parse Action Arguments
