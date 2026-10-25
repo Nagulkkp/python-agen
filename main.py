@@ -1417,8 +1417,25 @@ def chat_with_agent(payload: ChatRequest):
                 )
 
         # 1b. Valkey Fast-Path: Instant Module Lifecycle & Flow lookup (All 12 HIMES Domains)
-        is_module_query = any(phrase in msg_lower for phrase in ["flow", "lifecycle", "process", "explain", "tables", "how does", "steps for", "pathina", "workflow", "eclaim", "claim", "pa_", "module", "paaru"])
-        if is_module_query:
+        # CRITICAL: ONLY trigger general module overview if user explicitly asks for the general module overview / architecture,
+        # NEVER hijack specific functional or capability questions (e.g. "allow pannuma", "multiple invoices", "how to revert", "can we do X")!
+        specific_question_markers = [
+            "allow", "mudiyum", "mudium", "mudiyuma", "mudiyadhu", "pannum", "pannuma", "pannalama", "pannalam",
+            "can ", "can i", "can we", "is it possible", "how to", "how do", "why", "what happens", "epdi", "eppadi",
+            "enna aagum", "revert", "cancel", "multiple", "refund", "receipt", "short payment", "discount", "advance",
+            "deposit", "copay", "co-pay", "vat", "tax", "thevai", "thevaiya", "edhuku", "ethuku", "difference", "compare",
+            "illaye", "answer"
+        ]
+        has_specific_question = any(w in msg_lower for w in specific_question_markers)
+
+        is_module_overview_request = not has_specific_question and any(
+            phrase in msg_lower for phrase in [
+                "explain module", "module overview", "module lifecycle", "module flow",
+                "explain the flow", "show workflow", "all tables in", "tables for module",
+                "lifecycle of", "architecture of"
+            ]
+        )
+        if is_module_overview_request:
             module_map = {
                 "lis": ["lis", "lab", "laboratory", "specimen", "pathology", "sample accession"],
                 "ris": ["ris", "radiology", "pacs", "dicom", "xray", "mri", "ct scan", "imaging"],
@@ -1439,7 +1456,8 @@ def chat_with_agent(payload: ChatRequest):
                     mod_data = valkey_manager._get(f"himes:module:{mod_k}")
                     if mod_data:
                         tables_str = ", ".join(mod_data.get("primary_tables", [])[:6])
-                        workflows = "\n".join([f"• {wf}" for wf in mod_data.get("key_workflows", [])])
+                        raw_wf = mod_data.get("key_workflows") or mod_data.get("rules") or []
+                        workflows = "\n".join([f"• {wf}" for wf in raw_wf])
                         if current_mode == "developer":
                             reply = (
                                 f"**HIMES {mod_data.get('title')} Lifecycle Details:**\n\n"
