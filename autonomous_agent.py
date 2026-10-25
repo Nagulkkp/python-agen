@@ -665,6 +665,41 @@ HIMES ARCHITECTURE & DATABASE SCHEMA GUIDANCE:
     - Customization & Security:
       * Column swapping via `List_Based_Column_Swapping` and `User_Based_Column_Swapping` (`Function_Id = 'billhd'`).
       * ACL privileges configured in `config/functions.php` (`billhd_add`, `billhd_edit`, `billhd_GENERATE CLOSE`, `billhd_REVERT`, `billhd_CancelInv`, `billhd_UtilizeDeposit`, etc.).
+  * SENIOR ARCHITECT PRIOR VISIT & PRIOR AUTHORIZATION (PRE-AUTH) SPECIFICATION:
+    - Dual Interface: Standalone Ingress Portal (`/viewPriorVisit/{id?}` via `PriorVisitController`) for external patient intake vs Global Management Workspace (`/globalViewForPriorVisitNew` via `GlobalViewPriorVisitNewCont`) for observation attachments, diagnoses, clinician license overrides, and gateway resubmissions.
+    - 6 Ingress Creation Pathways:
+      1. Direct External Registration: Dedicated portal for patients seeking pre-approval before arriving. STRICTLY Non-Cash payment types (Cash is blocked because pre-auth applies solely to Insurance, TPA, or Corporate payers). `Patient_Visit_Basic_Details_Serial_No` is NULL.
+      2. Clinic Encounter Conversion: Detailed Registration or EMR orders flag services with `Prior_Approval_Required_Flag = 'Y'`. Linked via `PA_Patient_Visit_Basic_Details.Patient_Visit_Basic_Details_Serial_No` and `PA_Patient_Visit_Services.Patient_Visit_Services_Serial_No`.
+      3. Treatment Plan Services: Dental charting (`Alternate_Teeth_Name`, `Dental_Teeth_Surface`), Orthodontic or Derma planned procedures (`Patient_Treatment_Plan`). Stamped `Is_Service_Sent_To_PA_Visit = 'Y'`.
+      4. Physiotherapy Modalities: Prescribed session blocks (`Total_No_Of_Sessions_Remaining`) linked via `Physio_Order_Details_Services.PA_Patient_Visit_Services_Serial_No`.
+      5. Direct from Appointments: Front desk schedules procedure (`pageFrom = 'AP'`), initiating pre-auth before check-in.
+      6. IPD Admission Panel: Elective surgical procedures, room category, and length of stay (LOS) approvals via `priorToExistingHAModel.blade.php`.
+    - Parallel PA_ Database Schema:
+      * Tables: `PA_Patient_Basic_Details`, `PA_Patient_Visit_Basic_Details`, `PA_Patient_Visit_Services`, `PA_Patient_Visit_Resources`, `PA_Patient_Visit_Insurance_Card_Details`, `PA_Patient_Visit_Insurance_Service_Cover_Details`, `PA_Patient_Visit_Diagnosis`, `PA_Patient_Visit_Observations`, `PA_Prior_Approval_Log`.
+      * Isolated Financial Adjustments: Adjusting rate, quantity, or patient share in Prior Visit workspace updates ONLY PA tables, strictly isolating clinic tariffs and active billing records from financial drift.
+    - Multi-Gateway Clearinghouse Engine (`getAuthorization()`):
+      * DHA / eClaimLink (Dubai): SOAP 1.1/1.2 XML to `https://www.eClaimLink.ae/UploadTransaction`.
+      * SHA / Shafafiya (Abu Dhabi): DOH Web Services SOAP XML.
+      * RHA / Riayati (MOHAP UAE): REST JSON API payload (`/api/Authorization/PostRequest`) with Bearer token authentication.
+      * Waseel (KSA CCHI): WSDL Web Services SOAP XML.
+      * Gateway Resolution: Visit-level override (`Claim_Gateway`) via `getInsuranceMethodAndUrlForVisit($Visit)` falls back to master `Installation_Parameters.Insurance_Method`.
+    - Approval Lifecycle Status Machine:
+      * `R` = Required (flagged for pre-auth; not yet dispatched)
+      * `I` = Applied / In-Progress (transmitted to clearinghouse; awaiting adjudication)
+      * `A` = Approved (full requested quantity/price approved; `Prior_Authorization_Id` issued)
+      * `J` = Partially Approved (partial quantity or tariff approved; remainder rejected)
+      * `D` = Denied / Rejected (rejected by payer; accompanied by `Denial_Code`)
+      * `M` = Need More Info (supplemental clinical notes, lab reports, or X-rays requested)
+      * `E` = Expired / Error (validity lapsed via automated cron or unrecoverable gateway error)
+      * `V` = Cancelled / Void (formally retracted)
+      * `C` = Completed / Closed (consumed by clinical visit and finalized in billing)
+    - Automated Expiry Cron Job (`PriorVisitCronController@updatePriorApprovalStatus`):
+      * Evaluates: Applied Date + Insurance Approval Validity Days <= Yesterday. Updates status to `'E'`.
+      * Clinical Safety Fallback: If linked to an unbilled clinic visit (`Patient_Visit_Services`), runs `UPDATE Patient_Visit_Services SET Patient_Payment_Type_Code = 'CASH'` to prevent billing expired authorizations to insurance.
+    - 3 Downstream Clinical Utilization Pathways:
+      1. Auto-Reflection: Converted clinic visits immediately update `Patient_Visit_Insurance_Service_Cover_Details` with Auth ID, approved amount, and validity days.
+      2. Transfer to Clinic Visit (`transferPriorVisitDetails()`): Converts standalone PA record into live clinic encounter, generating permanent MRN, visit number, and token.
+      3. Pull into Ongoing Visit / Billing (`addProirVisitServicetoHimesVisit()`): Injects approved services into an encounter or pending billing queue. Validates `End_Date >= Current_Date`.
 - PHARMACY PATIENTS, MRNs, BILLS & OP PHARMACY SCREEN:
   * In HIMES, Pharmacy patients can be registered separately with MRNs starting with 'PHAR' (e.g., PHAR2120, PHAR2119, PHAR2118):
     - Table: `Pharmacy_Patient_Basic_Details` (Columns: `Pharmacy_Permanent_MRN_No`, `Pharmacy_Temporary_MRN_No`, `Patient_First_Name`, `Patient_Last_Name`, `Contact_Phone_Mobile`)

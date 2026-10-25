@@ -671,8 +671,8 @@ def format_user_mode_response(reply: str) -> str:
 
     # 5c. Strip raw URL routes and parentheticals like (/Appointment Calendar Scheduler) or (/patientBilling)
     text = re.sub(r'\(\s*/[A-Za-z0-9_\-\s/{}\?]+\s*\)', '', text)
-    text = re.sub(r'\(\s*/?[A-Za-z0-9_\-\s/]*(?:Scheduler|Registration|Panel|Controller|Billing|routes)[A-Za-z0-9_\-\s/]*\)', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'/(?:viewQuickRegistration|patientRegistration|appointmentScheduler|AppointmentCalendarScheduler|emrVisitEntryPanel|patientBilling|viewGlobalPatientBilling|addPatientBilling|editPatientBilling)\b', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\(\s*/?[A-Za-z0-9_\-\s/]*(?:Scheduler|Registration|Panel|Controller|Billing|routes|PriorVisit)[A-Za-z0-9_\-\s/]*\)', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'/(?:viewQuickRegistration|patientRegistration|appointmentScheduler|AppointmentCalendarScheduler|emrVisitEntryPanel|patientBilling|viewGlobalPatientBilling|addPatientBilling|editPatientBilling|viewPriorVisit|globalViewForPriorVisitNew)\b', '', text, flags=re.IGNORECASE)
 
     # 5d. User Mode: Mask raw SQL table names, primary keys, and cron names with intuitive healthcare terms
     table_replacements = [
@@ -699,6 +699,18 @@ def format_user_mode_response(reply: str) -> str:
         (r'`?Patient_Visit_Admission_Details`?', 'Inpatient Admission Details'),
         (r'`?Patient_Basic_Details_Link_Merging`?', 'Patient Merge Records'),
         (r'`?Patient_Identification_Details`?', 'Patient Identification Documents'),
+        # Prior Visit & Pre-Auth Tables
+        (r'`?PA_Patient_Basic_Details`?', 'Prior Authorization Patient Details'),
+        (r'`?PA_Patient_Visit_Basic_Details`?', 'Prior Authorization Visit Records'),
+        (r'`?PA_Patient_Visit_Services`?', 'Prior Authorization Requested Services'),
+        (r'`?PA_Patient_Visit_Resources`?', 'Prior Authorization Doctor Allocation'),
+        (r'`?PA_Patient_Visit_Insurance_Card_Details`?', 'Prior Authorization Insurance Card Details'),
+        (r'`?PA_Patient_Visit_Insurance_Service_Cover_Details`?', 'Prior Authorization Insurance Approval Records'),
+        (r'`?PA_Patient_Visit_Diagnosis`?', 'Prior Authorization Clinical Diagnoses'),
+        (r'`?PA_Patient_Visit_Observations`?', 'Prior Authorization Clinical Observations'),
+        (r'`?PA_Prior_Approval_Log`?', 'Prior Authorization Submission Audit Logs'),
+        (r'`?Physio_Order_Details_Services`?', 'Physiotherapy Session Details'),
+        (r'`?Patient_Treatment_Plan`?', 'Patient Treatment Plan'),
         # Billing Tables & Columns
         (r'`?Patient_Bill_Header`?', 'Patient Invoice'),
         (r'`?Patient_Bill_Detail_Services_Packages_Resources_Drugs`?', 'Invoice Line Items'),
@@ -726,6 +738,11 @@ def format_user_mode_response(reply: str) -> str:
         (r'`?Stock_Item_Insurance_Price`?', 'Pharmacy Insurance Price List'),
         (r'`?Branch_Free_Paid_Followup_Services`?', 'Follow-up Service Rules'),
         # Controllers & Parameters
+        (r'`?PriorVisitController(?:\.php)?`?', 'Prior Visit Service'),
+        (r'`?PriorVisitOperationController(?:\.php)?`?', 'Prior Visit Service'),
+        (r'`?GlobalViewPriorVisitNewCont(?:roller)?(?:\.php)?`?', 'Global Prior Visit Management Service'),
+        (r'`?PriorVisitCronController(?:\.php)?`?', 'Prior Authorization Expiry Service'),
+        (r'`?PriorVisitTransferController(?:\.php)?`?', 'Prior Visit Transfer Service'),
         (r'`?PatientBillingGetCont(?:roller)?(?:\.php)?`?', 'Patient Billing Service'),
         (r'`?PatientBillingPartOneController(?:\.php)?`?', 'Billing Engine Service'),
         (r'`?PatientBillingController(?:\.php)?`?', 'Billing Counter Service'),
@@ -1550,6 +1567,7 @@ def chat_with_agent(payload: ChatRequest):
         # 3. Dispatch to Dynamic Multi-Step Chain OR HIMES Multi-Agent Specialist Orchestrator
         from chains.multi_step_clinical_chain import is_multi_step_query, run_multi_step_clinical_chain
 
+        effective_message = payload.message
         if is_multi_step_query(effective_message):
             chain_res = run_multi_step_clinical_chain(
                 message=effective_message,

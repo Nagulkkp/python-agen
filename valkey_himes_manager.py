@@ -541,6 +541,18 @@ class ValkeyHimesManager:
                     "Refunds & Credit Notes: Recalculation excess refunded via refundamt dialog. Finalized invoice reversals use AddCreditNote() to generate official Credit Notes. Invoice cancellation restores inventory stock via returnallstockfromcustomerQtyforcancelrequest().",
                     "UI Customization & ACL: Drag-and-drop column swapping (List_Based_Column_Swapping / User_Based_Column_Swapping). Protected by role privileges in config/functions.php (billhd_add, billhd_edit, billhd_GENERATE CLOSE, billhd_REVERT, billhd_CancelInv, billhd_UtilizeDeposit, etc.)."
                 ]
+            },
+            "prior_visit_workflow": {
+                "description": "HIMES Prior Visit & Prior Authorization (Pre-Auth) Subsystem",
+                "rules": [
+                    "Dedicated Ingress & Global Workspace: Standalone Ingress Portal (/viewPriorVisit/{id?} via PriorVisitController) for external patient pre-auth vs Global Workspace (/globalViewForPriorVisitNew via GlobalViewPriorVisitNewCont) for observation attachments, diagnosis, and resubmissions.",
+                    "6 Ingress Creation Pathways: 1) Direct External Registration (Strictly Non-Cash payment only; cash blocked as pre-auth is solely for Insurance/TPA/Corporate), 2) Clinic Encounter Conversion (Patient_Visit_Basic_Details_Serial_No linked), 3) Treatment Plan Services (Dental teeth numbers, Derma packages), 4) Physiotherapy Modalities (session tracking via Physio_Order_Details_Services), 5) Direct from Appointments (pageFrom='AP' before check-in), 6) IPD/Daycare Admission Panel (elective surgeries and room category).",
+                    "Parallel PA_ Database Schema: Dedicated tables (PA_Patient_Basic_Details, PA_Patient_Visit_Basic_Details, PA_Patient_Visit_Services, PA_Patient_Visit_Insurance_Service_Cover_Details, PA_Prior_Approval_Log). Price, quantity, and copay adjustments in Prior Visit update ONLY PA tables, strictly isolating clinical billing ledgers.",
+                    "Multi-Gateway Clearinghouse Engine: Dispatcher supporting DHA (eClaimLink Dubai SOAP XML), SHA (Shafafiya Abu Dhabi SOAP XML), RHA (Riayati MOHAP REST JSON with Bearer tokens), and Waseel (KSA CCHI Web Service). Visit override via Claim_Gateway falls back to Installation_Parameters.",
+                    "Approval Lifecycle States: R=Required, I=Applied/In-Progress, A=Approved (Pre-Auth ID issued), J=Partially Approved, D=Denied (with Denial_Code), M=Need More Info, E=Expired/Error, V=Cancelled/Void, C=Completed/Closed.",
+                    "Automated Expiry Cron: PriorVisitCronController checks Applied Date + Validity Days <= Yesterday. Updates status to 'E'. Clinical Safety Fallback: Updates Patient_Visit_Services.Patient_Payment_Type_Code = 'CASH' if linked to an unbilled clinic visit to block unauthorized claim submissions.",
+                    "3 Downstream Clinical Pathways: 1) Auto-Reflection (active clinic visit PVISCD updated with Auth ID and approved limits), 2) Transfer to Clinic Visit (transferPriorVisitDetails transforms standalone PA into new clinic visit with MRN and token), 3) Ingestion into Ongoing Visit / Billing (addProirVisitServicetoHimesVisit pulls valid unexpired pre-auths End_Date >= Current_Date into encounter or pending billing queue)."
+                ]
             }
         }
 

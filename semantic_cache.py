@@ -265,7 +265,10 @@ def verify_answer_relevance(user_query: str, candidate_answer: str) -> bool:
         ("deposit", ["deposit", "advance", "adjusted", "balance"]),
         ("copay", ["copay", "co-pay", "deductible", "coinsurance", "patient share"]),
         ("vat", ["vat", "tax", "trn"]),
-        ("prior approval", ["prior approval", "pre-auth", "preauth", "authorization", "approval"])
+        ("prior approval", ["prior approval", "pre-auth", "preauth", "authorization", "approval"]),
+        ("prior visit", ["prior visit", "pre-auth", "preauth", "prior authorization", "pa_"]),
+        ("pre-auth", ["pre-auth", "preauth", "prior approval", "authorization", "payer"]),
+        ("preauth", ["pre-auth", "preauth", "prior approval", "authorization", "payer"])
     ]
     for topic, synonyms in specialized_topics:
         if topic in q_lower:
