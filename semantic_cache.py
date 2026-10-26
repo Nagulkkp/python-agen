@@ -235,7 +235,8 @@ def verify_answer_relevance(user_query: str, candidate_answer: str) -> bool:
        the answer must take a clear affirmative or negative stance ('yes', 'no', 'aama', 'illai',
        'allow', 'permit', 'blocked', 'mudiyaathu', 'mudiyum').
     """
-    if not candidate_answer or not str(candidate_answer).strip():
+    # 0. Healthcare Transaction Firewall: If query is transactional, reject ANY static cache
+    if is_transactional_query(user_query):
         return False
 
     q_lower = user_query.lower()
@@ -345,6 +346,51 @@ def is_patient_or_phi_data(query: str, answer: str = "") -> bool:
     return False
 
 
+TRANSACTIONAL_KEYWORDS = [
+    # Live dates, times & relative timeframes
+    "today", "yesterday", "tomorrow", "tonight", "this morning", "this week", "this month",
+    "inaikki", "inikku", "nethu", "naalaikku", "ippo", "ippo irukura", "current date", "getdate",
+    # Operational quantities, counts & aggregations
+    "how many", "ethana", "evvalavu", "total count", "total patients", "total visits", "total bills",
+    "highest bill", "lowest bill", "athiga amount", "max bill", "min bill", "collection", "revenue",
+    # Live doctor status, availability & schedules
+    "available doctor", "doctor available", "who is on duty", "duty doctor", "doctor on leave",
+    "doctor leave", "entha doctor", "who is available", "leave list", "slots available", "slot", "slots",
+    # Live patient, encounter, bed & lab operational states
+    "patient registered", "registered today", "registered yesterday", "token", "queue", "waiting list",
+    "unbilled services", "pending services", "bill amount", "receipt amount", "deposit balance",
+    "inpatient count", "bed occupied", "active admissions", "panic values", "critical alerts"
+]
+
+def is_transactional_query(query: str, answer: str = "") -> bool:
+    """
+    HEALTHCARE REAL-TIME DATA FRESHNESS & PATIENT SAFETY FIREWALL:
+    Distinguishes Live Operational & Transactional queries from Static Knowledge/Workflow queries.
+
+    CRITICAL HEALTHCARE RULE:
+    - Transactional queries MUST ALWAYS query the live MSSQL database.
+    - NEVER return static or cached ChromaDB/Valkey values for transactional questions!
+    - In healthcare, returning stale or wrong transactional data directly compromises patient care.
+    """
+    if not query:
+        return False
+    q_lower = query.lower()
+
+    # 1. Any specific patient entity or PHI pattern
+    if is_patient_or_phi_data(query, answer):
+        return True
+
+    # 2. Check for live operational timeframe or aggregate transactional keywords
+    if any(k in q_lower for k in TRANSACTIONAL_KEYWORDS):
+        return True
+
+    # 3. Check for specific numeric IDs (e.g. 4+ digits) referring to MRN, Visit, Bill, Invoice, Token
+    if re.search(r'\b\d{4,}\b', query):
+        return True
+
+    return False
+
+
 def purge_patient_phi_from_cache() -> int:
     """
     Scans the ChromaDB cache_collection and purges all existing patient/visit records,
@@ -381,9 +427,9 @@ def check_semantic_cache(user_query: str, threshold: float = 0.25) -> Optional[D
     if not user_query or not user_query.strip():
         return None
 
-    # Healthcare Privacy & Real-time DB Guardrail: Bypass cache for patient data
-    if is_patient_or_phi_data(user_query):
-        print(f"[CACHE BYPASS - PATIENT/PHI GUARDRAIL] Query '{user_query}' contains patient/visit entity. Always querying live MSSQL DB.")
+    # Healthcare Real-time & Transactional Firewall: Bypass cache for patient or transactional data
+    if is_transactional_query(user_query):
+        print(f"[CACHE BYPASS - TRANSACTIONAL FIREWALL] Query '{user_query}' requires live operational data. Always querying live MSSQL DB.")
         return None
 
     try:
@@ -462,9 +508,9 @@ def save_to_semantic_cache(user_query: str, answer: str) -> Optional[str]:
     if not user_query or not answer:
         return None
 
-    # Healthcare Privacy & Real-Time Data Guardrail: Block patient/visit records
-    if is_patient_or_phi_data(user_query, answer):
-        print(f"[CACHE BLOCKED - PATIENT/PHI GUARDRAIL] Skipped caching patient/visit records to protect PHI and guarantee real-time data freshness.")
+    # Healthcare Privacy & Real-Time Data Guardrail: Block transactional / patient records
+    if is_transactional_query(user_query, answer):
+        print(f"[CACHE BLOCKED - TRANSACTIONAL FIREWALL] Skipped caching transactional/patient data to protect healthcare data integrity.")
         return None
 
     lower_ans = answer.lower()

@@ -1506,13 +1506,10 @@ def chat_with_agent(payload: ChatRequest):
                         )
 
         # Healthcare Privacy & Real-Time Data Freshness Guardrail: NEVER cache patient, encounter, or clinical PHI!
+        from semantic_cache import is_transactional_query
         is_patient_query = bool(v_m or m_m) or is_patient_or_phi_data(payload.message)
         is_followup = not is_patient_query and bool(sess["active_entities"].get("visit_no") or sess["active_entities"].get("mrn"))
-        is_live_or_dynamic_query = is_patient_query or any(w in msg_lower for w in [
-            "available", "availability", "today", "tomorrow", "yesterday", "inaikki", "inikku", "nethu", "naalaikku",
-            "doctor available", "slot", "slots", "schedule", "leave", "leaves", "who is on duty", "duty",
-            "entha doctor", "who is available", "appointment"
-        ])
+        is_live_or_dynamic_query = is_patient_query or is_transactional_query(payload.message)
         
         # Grounding & PHI Rule: Only check semantic cache for static system/workflow knowledge
         if not is_followup and not is_live_or_dynamic_query:
